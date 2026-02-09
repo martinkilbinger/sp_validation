@@ -1455,11 +1455,11 @@ class CosmologyValidation:
             e1_col, e2_col, w_col = [
                 self.cc[ver]["shear"][k] for k in ["e1_col", "e2_col", "w_col"]
             ]
-            if w_col != "None":
-                weights = self.results[ver].dat_shear[w_col]
-            else:
-                weights = None
             with self.results[ver].temporarily_read_data():
+                if w_col != "None":
+                    weights = self.results[ver].dat_shear[w_col]
+                else:
+                    weights = None
                 self._c1[ver] = np.average(
                     self.results[ver].dat_shear[e1_col] / R,
                     weights=weights,

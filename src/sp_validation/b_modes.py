@@ -661,7 +661,7 @@ def plot_pure_eb_correlations(
         ax.set(xscale="log", xlabel=r"$\theta$ [arcmin]")
         ax.axhline(0, alpha=0.3, color="k", linestyle="--", linewidth=0.5)
         ax.legend(loc="upper left")
-        ax.set_ylim(-0.5, 2)
+        ax.set_ylim(-1.5, 3)
 
     # Save the axis limits after data plotting but before adding gray regions
     original_xlims = [ax.get_xlim() for ax in axs]
