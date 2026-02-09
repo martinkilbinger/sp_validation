@@ -744,8 +744,15 @@ class CosmologyValidation:
         for ver in self.versions:
             self.print_magenta(ver)
             with self.results[ver].temporarily_read_data():
-                w = self.results[ver].dat_shear[self.cc[ver]["shear"]["w_col"]]
-                n_eff_gal[ver] = 1/(self.area[ver]*60*60)* np.sum(w)**2/np.sum(w**2)
+                w_col = self.cc[ver]["shear"]["w_col"]
+                if w_col != "None":
+                    w = self.results[ver].dat_shear[w_col]
+                    sum_w = np.sum(w)
+                    sum_w2 = np.sum(w**2)
+                    sum_w_ratio = sum_w ** 2 / sum_w2
+                else:
+                    sum_w_ratio = 1
+                n_eff_gal[ver] = 1/(self.area[ver]*60*60) * sum_w_ratio
                 print(f"n_eff_gal = {n_eff_gal[ver]:.2f} gal./arcmin^-2")
             
         self._n_eff_gal = n_eff_gal
@@ -759,10 +766,16 @@ class CosmologyValidation:
             with self.results[ver].temporarily_read_data():
                 e1 = self.results[ver].dat_shear[self.cc[ver]["shear"]["e1_col"]]
                 e2 = self.results[ver].dat_shear[self.cc[ver]["shear"]["e2_col"]]
-                w = self.results[ver].dat_shear[self.cc[ver]["shear"]["w_col"]]
-                ellipticity_dispersion[ver] = np.sqrt(
-                    0.5*(np.average(e1**2, weights=w**2) + np.average(e2**2, weights=w**2))
-                )
+                w_col = self.cc[ver]["shear"]["w_col"]
+                if w_col != "None":
+                    w = self.results[ver].dat_shear[w_col]
+                    ellipticity_dispersion[ver] = np.sqrt(
+                        0.5*(np.average(e1**2, weights=w**2) + np.average(e2**2, weights=w**2))
+                    )
+                else:
+                    ellipticity_dispersion[ver] = np.sqrt(
+                        0.5*(np.average(e1**2) + np.average(e2**2))
+                    )
                 print(f"Ellipticity dispersion = {ellipticity_dispersion[ver]:.4f}")
         self._ellipticity_dispersion = ellipticity_dispersion
 
@@ -1342,7 +1355,11 @@ class CosmologyValidation:
                     e2 = (
                         self.results[ver].dat_shear[self.cc[ver]["shear"]["e2_col"]] / R
                     )
-                    w = self.results[ver].dat_shear[self.cc[ver]["shear"]["w_col"]]
+                    w_col = self.cc[ver]["shear"]["w_col"]
+                    if w_col != "None":
+                        w = self.results[ver].dat_shear[w_col]
+                    else:
+                        w = np.ones_like(e1)
 
                     axs[0].hist(
                         e1,
@@ -1383,7 +1400,11 @@ class CosmologyValidation:
             for ver in self.versions:
                 self.print_magenta(ver)
                 with self.results[ver].temporarily_read_data():
-                    w = self.results[ver].dat_shear[self.cc[ver]["shear"]["w_col"]]
+                    w_col = self.cc[ver]["shear"]["w_col"]
+                    if w_col != "None":
+                        w = self.results[ver].dat_shear[w_col]
+                    else:
+                        w = None
 
                     plt.hist(
                         w,
@@ -1434,14 +1455,18 @@ class CosmologyValidation:
             e1_col, e2_col, w_col = [
                 self.cc[ver]["shear"][k] for k in ["e1_col", "e2_col", "w_col"]
             ]
+            if w_col != "None":
+                weights = self.results[ver].dat_shear[w_col]
+            else:
+                weights = None
             with self.results[ver].temporarily_read_data():
                 self._c1[ver] = np.average(
                     self.results[ver].dat_shear[e1_col] / R,
-                    weights=self.results[ver].dat_shear[w_col],
+                    weights=weights,
                 )
                 self._c2[ver] = np.average(
                     self.results[ver].dat_shear[e2_col] / R,
-                    weights=self.results[ver].dat_shear[w_col],
+                    weights=weights,
                 )
         self.print_done("Finished additive bias calculation.")
 
@@ -1518,7 +1543,11 @@ class CosmologyValidation:
             with self.results[ver].temporarily_read_data():
                 e1 = self.results[ver].dat_shear[self.cc[ver]["shear"]["e1_col"]]
                 e2 = self.results[ver].dat_shear[self.cc[ver]["shear"]["e2_col"]]
-                w = self.results[ver].dat_shear[self.cc[ver]["shear"]["w_col"]]
+                w_col = self.cc[ver]["shear"]["w_col"]
+                if w_col != "None":
+                    w = self.results[ver].dat_shear[w_col]
+                else:
+                    w = np.ones_like(e1)
                 if ver != "DES":
                     R = self.cc[ver]["shear"]["R"]
                     g1 = (e1 - self.c1[ver]) / R
@@ -1891,12 +1920,17 @@ class CosmologyValidation:
                         self.results[ver].dat_shear[self.cc[ver]["shear"]["e2_col"]]
                         - self.c2[ver]
                     ) / R
+                    w_col = self.cc[ver]["shear"]["w_col"]
+                    if w_col != "None":
+                        weights = self.results[ver].dat_shear[w_col]
+                    else:
+                        weights = np.ones_like(g1)
                     cat_gal = treecorr.Catalog(
                         ra=self.results[ver].dat_shear["RA"],
                         dec=self.results[ver].dat_shear["Dec"],
                         g1=g1,
                         g2=g2,
-                        w=self.results[ver].dat_shear[self.cc[ver]["shear"]["w_col"]],
+                        w=weights,
                         ra_units=self.treecorr_config["ra_units"],
                         dec_units=self.treecorr_config["dec_units"],
                         npatch=npatch,
@@ -1967,7 +2001,7 @@ class CosmologyValidation:
                 labels=labels,
                 xlog=True,
                 xlim=[self.theta_min_plot, self.theta_max_plot],
-                ylim=[-1e-6, 2e-5],
+                ylim=[-2e-6, 5e-6],
                 colors=colors,
                 linestyles=linestyles,
                 shift_x=True,
@@ -2000,7 +2034,7 @@ class CosmologyValidation:
                 xlog=True,
                 ylog=True,
                 xlim=[self.theta_min_plot, self.theta_max_plot],
-                ylim=[1e-9, 3e-5],
+                ylim=[1e-8, 1e-5],
                 colors=colors,
                 linestyles=linestyles,
                 shift_x=True,
@@ -2751,7 +2785,11 @@ class CosmologyValidation:
 
                     self.print_cyan("Getting analytic noise bias.")
 
-                    e1, e2, w = cat_gal[self.cc[ver]["shear"]["e1_col"]], cat_gal[self.cc[ver]["shear"]["e2_col"]], cat_gal[self.cc[ver]["shear"]["w_col"]]
+                    e1, e2, w = (
+                        cat_gal[self.cc[ver]["shear"]["e1_col"]],
+                        cat_gal[self.cc[ver]["shear"]["e2_col"]],
+                        cat_gal[self.cc[ver]["shear"]["w_col"]],
+                    )
                     variance_map = self.get_variance_map(self.nside, e1, e2, w, unique_pix, idx_rep)
 
                     noise_bias = hp.nside2pixarea(self.nside)*np.mean(variance_map)
