@@ -52,6 +52,8 @@ class metacal:
         relative size minimum
     rel_size_max : float, optional, default=3.0
         relative size maximum
+    eps_max: float, optional
+        maximum ellipticiy (absolute value), default is ``None``
     size_corr_ell : bool, optional, default=True
     global_R_weight : str, optional,
         weight column name for global response matrix; default is ``None``
@@ -78,6 +80,7 @@ class metacal:
         snr_max=500,
         rel_size_min=0.5,
         rel_size_max=3.0,
+        eps_max=None,
         size_corr_ell=True,
         global_R_weight=None,
         sigma_eps=0.34,
@@ -93,12 +96,14 @@ class metacal:
         self._snr_max = snr_max
         self._rel_size_min = rel_size_min
         self._rel_size_max = rel_size_max
+        self._eps_max = eps_max
         self._size_corr_ell = size_corr_ell
         if verbose:
             print(
                 f'Metacal cuts: {snr_min}<snr<{snr_max}, '
                 + f'rel_size_min={rel_size_min}, '
                 + f'rel_size_max={rel_size_max}, '
+                + f'eps_max={eps_max}, '
                 + f'size_corr_ell={size_corr_ell}'
             )
             
@@ -381,12 +386,23 @@ class metacal:
 
             Tpsf = data['Tpsf']
 
+            if self._eps_max is not None:
+                eps = np.sqrt(
+                    data["g1"] ** 2 + data["g2"] ** 2
+                )
+                mask_eps = eps > self._eps_max
+                print(f"MKDEBUG cut on ellipticity of {self._eps_max}")
+                print(f"max eps after cut = {max(eps[mask_eps])}")
+            else:
+                mask_eps = True
+
             mask_tmp = (
                 (data['flag'] == 0)
                 & (Tr_tmp / Tpsf > self._rel_size_min)
                 & (Tr_tmp / Tpsf < self._rel_size_max)
                 & (snr_flux > self._snr_min)
                 & (snr_flux < self._snr_max)
+                & mask_eps
             )
 
             # Take care of rotated version

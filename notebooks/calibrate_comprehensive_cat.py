@@ -90,6 +90,9 @@ if obj._params["sky_regions"]:
 # Call metacal
 cm = config["metacal"]
 
+# Cut on ellipticity
+eps_max = cm.get("eps_max", None)
+
 # %%
 gal_metacal = metacal(
     dat,
@@ -99,6 +102,7 @@ gal_metacal = metacal(
     rel_size_min=cm["gal_rel_size_min"],
     rel_size_max=cm["gal_rel_size_max"],
     size_corr_ell=cm["gal_size_corr_ell"],
+    eps_max=eps_max,
     sigma_eps=cm["sigma_eps_prior"],
     global_R_weight=cm["global_R_weight"],
     col_2d=False,
