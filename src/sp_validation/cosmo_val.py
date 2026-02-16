@@ -2870,7 +2870,8 @@ class CosmologyValidation:
             else:
 
                 mask_path = self.cc[ver]['shear']['mask']
-                redshift_distr_path = os.path.join(self.data_base_dir, self.cc[ver]['shear']['redshift_distr'])
+                #redshift_distr_path = os.path.join(self.data_base_dir, self.cc[ver]['shear']['redshift_distr'])
+                redshift_distr_path = self.cc[ver]['shear']['redshift_distr']
 
                 config_path = os.path.join(out_dir, f"config_onecov_{ver}.ini")
 
