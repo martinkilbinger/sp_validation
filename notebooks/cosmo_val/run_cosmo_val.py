@@ -89,8 +89,8 @@ cv.plot_pure_eb(
     max_sep_int=300,
     nbins_int=100,
     npatch=256,
-    var_method="jackknife",
 )
+#var_method="jackknife",
 
 # %%
 cv.plot_cosebis(

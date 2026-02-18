@@ -57,13 +57,13 @@ print(bits)
 # +
 # Set parameters
 base = "unions_shapepipe_comprehensive"
-ver = "v1.3.c"
+ver = "v1.6.c"
 
 if ver == "v1.3.c":
     year = 2022
 else:
     year = 2024
-ver_maj = "v1.5"
+ver_maj = "v1.6"
 
 obj._params["input_path"] = f"{base}_{year}_{ver_maj}.c.hdf5"
 obj._params["output_path"] = f"{base}_struc_{year}_{ver_maj}.c.hdf5"

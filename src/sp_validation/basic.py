@@ -390,9 +390,7 @@ class metacal:
                 eps = np.sqrt(
                     data["g1"] ** 2 + data["g2"] ** 2
                 )
-                mask_eps = eps > self._eps_max
-                print(f"MKDEBUG cut on ellipticity of {self._eps_max}")
-                print(f"max eps after cut = {max(eps[mask_eps])}")
+                mask_eps = eps < self._eps_max
             else:
                 mask_eps = True
 

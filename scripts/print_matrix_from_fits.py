@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Read matrix entries from FITS header and print in tex or pdf format."""
+"""Read matrix entries from FITS header and print in txt, tex, or pdf format."""
 
 from astropy.io import fits
 import numpy as np
@@ -62,6 +62,34 @@ def get_matrix_from_header(header, prefix):
                 raise KeyError(f"Key '{key}' not found in FITS header")
             matrix[i-1, j-1] = header[key]
     return matrix
+
+
+def matrix_to_txt(matrix, prec):
+    """Convert matrix to ASCII format.
+
+    Parameters
+    ----------
+    matrix : numpy.ndarray
+        2x2 matrix
+    prec : int
+        number of significant digits
+
+    Returns
+    -------
+    str
+        ASCII-formatted matrix string
+
+    """
+    col_widths = []
+    for j in range(2):
+        col_widths.append(max(len(f"{matrix[i, j]:.{prec}g}") for i in range(2)))
+
+    lines = []
+    for i in range(2):
+        vals = [f"{matrix[i, j]:.{prec}g}".rjust(col_widths[j]) for j in range(2)]
+        lines.append("[ " + "  ".join(vals) + " ]")
+
+    return "\n".join(lines)
 
 
 def matrix_to_tex(matrix, prec, exp_thresh):
@@ -147,7 +175,7 @@ def main():
     help_strings = {
         "input": "Input FITS file",
         "prefix": "Prefix for matrix entries (default: {})",
-        "format": "Output format: tex or pdf (default: {})",
+        "format": "Output format: txt, tex or pdf (default: {})",
         "prec": "Number of significant digits (default: {})",
         "exp_thresh": "Exponent threshold for scientific notation (default: {})",
         "output": "Output file path (extension added based on format)",
@@ -159,8 +187,8 @@ def main():
     if options["input"] is None:
         raise ValueError("Input FITS file (-i) is required")
 
-    if options["format"] not in ["tex", "pdf"]:
-        raise ValueError("Format must be 'tex' or 'pdf'")
+    if options["format"] not in ["txt", "tex", "pdf"]:
+        raise ValueError("Format must be 'txt', 'tex', or 'pdf'")
 
     # Read FITS header
     with fits.open(options["input"]) as hdu:
@@ -177,7 +205,14 @@ def main():
     if options["output"]:
         output_path = f"{options['output']}.{options['format']}"
 
-    if options["format"] == "tex":
+    if options["format"] == "txt":
+        txt_content = matrix_to_txt(matrix, options["prec"])
+        print(txt_content)
+        if output_path:
+            with open(output_path, "w") as f:
+                f.write(txt_content + "\n")
+            print(f"Written to {output_path}")
+    elif options["format"] == "tex":
         full_tex = r"""\documentclass[preview,border=2pt]{article}
 \usepackage{amsmath}
 \begin{document}
