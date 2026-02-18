@@ -544,6 +544,9 @@ SP_v1.4.6.3:
     e2_col: e2
     e2_col_corrected: e2_leak_corrected
     e2_PSF_col: e2_PSF
+    cols:
+      - RA
+      - Dec
   star:
     ra_col: RA
     dec_col: Dec
@@ -1188,7 +1191,9 @@ SP_v1.6.6:
     e2_col: e2
     e2_col_corrected: e2_leak_corrected
     e2_PSF_col: e2_PSF
-    cols: RA,Dec
+    cols:
+      - RA
+      - Dec
   star:
     ra_col: RA
     dec_col: Dec

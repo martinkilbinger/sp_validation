@@ -588,6 +588,9 @@ class CosmologyValidation:
                 + f" shear yaml entry for version {ver}"
             )
 
+        # Auxillary dependences
+        params_in["cols"] = self.cc[ver]["shear"].get("cols")
+
         params_in["verbose"] = False
 
         return params_in
@@ -1203,8 +1206,8 @@ class CosmologyValidation:
             self.print_done(f"xi_sys_minus plot saved to {out_path}")
 
     def calculate_objectwise_leakage(self):
-        if not hasattr(self.results[self.versions[0]], "alpha_leak_mean"):
-            self.calculate_scale_dependent_leakage()
+        #if not hasattr(self.results[self.versions[0]], "alpha_leak_mean"):
+            #self.calculate_scale_dependent_leakage()
 
         self.print_start("Object-wise leakage:")
         mix = True

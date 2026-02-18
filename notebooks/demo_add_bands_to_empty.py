@@ -57,21 +57,33 @@ path_bands = "./UNIONS5000"
 path_base = "UNIONS."
 path_suff = "_SP_ugriz_photoz_ext.cat"
 
+"""
+In current empty hdf5 file:
+        H5T_IEEE_F32LE "Z_B";
+         H5T_IEEE_F32LE "Z_B_MIN";
+         H5T_IEEE_F32LE "Z_B_MAX";
+         H5T_IEEE_F32LE "T_B";
+         H5T_IEEE_F32LE "MAG_GAAP_0p7_u";
+         H5T_IEEE_F32LE "MAG_GAAP_0p7_g";
+         H5T_IEEE_F32LE "MAG_GAAP_0p7_r";
+         H5T_IEEE_F32LE "MAG_GAAP_0p7_i";
+         H5T_IEEE_F32LE "MAG_GAAP_0p7_z";
+         H5T_IEEE_F32LE "MAG_GAAP_0p7_z2";
+"""
 
 bands = ("u", "g", "r", "i", "z", "z2")
-base_keys = ["MAGERR_GAAP", "FLUX_GAAP", "FLUXERR_GAAP", "FLAG_GAAP", "MAG_LIM"]
 keys_mag = [f"MAG_GAAP_0p7_{band}" for band in bands]
-for base_key in base_keys:
-    keys_mag.extend([f"_{base_key}_{band}" for band in bands])
 
+#base_keys = ["MAGERR_GAAP", "FLUX_GAAP", "FLUXERR_GAAP", "FLAG_GAAP", "MAG_LIM"]
+#for base_key in base_keys:
+#   keys_mag.extend([f"_{base_key}_{band}" for band in bands])
+
+# "EXTINCTION", "MP_NAME", "ODDS"
 keys = [
-    "EXTINCTION",
-    "MP_NAME",
     "Z_B",
     "Z_B_MIN",
     "Z_B_MAX"
     "T_B",
-    "ODDS",
 ] + keys_mag
 
 hdu_no = 1
