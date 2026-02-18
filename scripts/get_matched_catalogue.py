@@ -1,8 +1,8 @@
-# Name of the file: get_matched_catalogue.py
+# Name file: get_matched_catalogue.py
 
-# @author: Antonin Corinaldi, antonin.corinaldi@cea.fr
+# @author: Antonin Corinaldi 
 
-# Aim: to match UNIONS shape catalogue with a spectroscopic catalogue and save the matched catalogue with redshift information.
+# Python file to match UNIONS shape catalogue with a spectroscopic catalogue and save the matched catalogue with redshift information.
 
 
 
