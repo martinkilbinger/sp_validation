@@ -275,14 +275,18 @@ class CosmologyValidation:
 
         def resolve_paths_for_version(ver):
             """Resolve relative paths for a version using its subdir."""
+            # MKDEBUG: use *path*, change in yaml file
+            path_keys = ["path", "redshift_distr", "mask"]
             subdir = Path(cc[ver]["subdir"])
             for key in cc[ver]:
-                if "path" in cc[ver][key]:
-                    path = Path(cc[ver][key]["path"])
-                    cc[ver][key]["path"] = (
-                        str(path) if path.is_absolute() else str(subdir / path)
-                    )
+                for path_key in path_keys:
+                    if path_key in cc[ver][key]:
+                        path = Path(cc[ver][key][path_key])
+                        cc[ver][key][path_key] = (
+                            str(path) if path.is_absolute() else str(subdir / path)
+                        )
 
+        # MKDEBUG remove nz
         resolve_paths_for_version("nz")
         processed = {"nz"}
         final_versions = []
@@ -539,9 +543,7 @@ class CosmologyValidation:
         # Set parameters
         params_in["input_path_shear"] = self.cc[ver]["shear"]["path"]
         params_in["input_path_PSF"] = self.cc[ver]["star"]["path"]
-        params_in["dndz_path"] = (
-            f"{self.cc['nz']['dndz']['path']}_{self.cc[ver]['pipeline']}_{self.cc['nz']['dndz']['blind']}.txt"
-        )
+        params_in["dndz_path"] = self.cc[ver]['shear']['redshift_distr']
         params_in["output_dir"] = f"{self.cc['paths']['output']}/leakage_{ver}"
 
         # Note: for SP these are calibrated shear estimates
@@ -1206,8 +1208,8 @@ class CosmologyValidation:
             self.print_done(f"xi_sys_minus plot saved to {out_path}")
 
     def calculate_objectwise_leakage(self):
-        #if not hasattr(self.results[self.versions[0]], "alpha_leak_mean"):
-            #self.calculate_scale_dependent_leakage()
+        if not hasattr(self.results[self.versions[0]], "alpha_leak_mean"):
+            self.calculate_scale_dependent_leakage()
 
         self.print_start("Object-wise leakage:")
         mix = True
@@ -1238,7 +1240,14 @@ class CosmologyValidation:
                 try:
                     results_obj.PSF_leakage()
                 except KeyError as e:
-                    print(f"{e}\nExpected key is missing from catalog.")
+                    print(f"Error when running PSF_leakage: {e}")
+                    # remove the results object for this version
+                    self.results_objectwise.pop(ver)
+
+                try:
+                    results_obj.obs_leakage()
+                except KeyError as e:
+                    print(f"Error when running obs_leakage: {e}")
                     # remove the results object for this version
                     self.results_objectwise.pop(ver)
 
@@ -2881,7 +2890,8 @@ class CosmologyValidation:
             else:
 
                 mask_path = self.cc[ver]['shear']['mask']
-                redshift_distr_path = os.path.join(self.data_base_dir, self.cc[ver]['shear']['redshift_distr'])
+                #redshift_distr_path = os.path.join(self.data_base_dir, self.cc[ver]['shear']['redshift_distr'])
+                redshift_distr_path = self.cc[ver]['shear']['redshift_distr']
 
                 config_path = os.path.join(out_dir, f"config_onecov_{ver}.ini")
 
