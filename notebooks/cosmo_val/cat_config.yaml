@@ -506,7 +506,7 @@ SP_v1.4.6:
     e2_col: e2
     path: unions_shapepipe_star_2024_v1.4.a.fits
 SP_v1.4.6.3:
-  subdir: /n17data/UNIONS/WL/v1.4.x
+  subdir: /arc/projects/unions/lensing/ShapePipe/unions_wl/1.4.x
   pipeline: SP
   colour: orange
   getdist_colour: 0.0, 0.5, 1.0
@@ -535,8 +535,8 @@ SP_v1.4.6.3:
     R: 1.0
     covmat_file: ./covs/shapepipe_A/cov_shapepipe_A.txt
     path: v1.4.6.3/unions_shapepipe_cut_struc_2024_v1.4.6.3.fits
-    redshift_distr: /n17data/sguerrini/UNIONS/WL/nz/v1.4.6/nz_SP_v1.4.6_A.txt
-    mask: v1.4.6/footprint_binned_8192.fits
+    redshift_distr: nz/v1.4.6.3/nz_SP_v1.4.6.3_A.txt
+    mask: v1.4.6.3/footprint_binned_8192.fits
     w_col: w_des
     e1_col: e1
     e1_col_corrected: e1_leak_corrected
