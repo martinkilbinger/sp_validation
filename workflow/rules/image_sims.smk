@@ -6,6 +6,18 @@ the sp_validation-side half of the split described in
 per-tile shape catalogues, then sp_validation merges, extracts, calibrates and
 finally measures the multiplicative/additive shear bias.
 
+One ShapePipe processing definition.  The per-tile ShapePipe processing (tile
+and exposure stages, up to ``final_cat``) is NOT defined here: ``im_shapepipe``
+drives ShapePipe's own Snakemake workflow (``workflow/bin/sp run`` in
+``shapepipe_repo``) once per shear branch, with ``input_type: image_sims``.
+The sims therefore pass through the same module order, config chain and
+PSF-model switch as the real catalogue -- the overlay config dir
+``workflow/config/cfis_image_sims`` differs from the real-data one only in
+input naming, the fake-PSF INIs and the merge column list -- so the m measured
+here calibrates the pipeline that is actually used.  ``psf_model`` is ``fake``
+(the true simulation PSF; star-free ``*_grid_N`` sims) or ``psfex``/``mccd``
+(sims with stars), exactly as ShapePipe's workflow spells it.
+
 Two images, one prefix shape.  Architecturally one image could run every
 stage -- the sp_validation image is built ``FROM`` the ShapePipe image, so it
 carries both stacks -- but the *published* sp_validation image's environment
@@ -18,7 +30,8 @@ binary deps, so until sp_validation is uv-locked with its deps declared
 (spun off as its own task), each half runs in its own repo's image -- the
 same split the gate766 baseline ran:
 
-* ShapePipe stages -> ``pipeline`` (raw images -> per-tile cats) and ``merge``
+* ShapePipe stages -> ``shapepipe`` (raw images -> per-tile cats, via ``sp
+  run``; ``sif_pipeline`` is the run config's ``container:``) and ``merge``
   (``create_final_cat`` -> ``final_cat_{sim}.hdf5``) run in ``sif_pipeline``
   (the ShapePipe image).
 * sp_validation stages -> ``manifest``, ``extract`` (-> comprehensive cat),
@@ -28,7 +41,8 @@ same split the gate766 baseline ran:
 Every rule sets ``container: None`` and calls ``apptainer exec`` explicitly
 through a shared prefix template (``EXEC_PIPELINE`` / ``EXEC`` -- identical
 env injections, different image), because the images are not the workflow's
-top-level container.  Everything is parameterised under
+top-level container.  ``im_shapepipe`` is the exception: ``sp`` owns its jobs'
+container through ShapePipe's own profile (``sp_profile``).  Everything is parameterised under
 ``config["image_sims"]`` -- the two ``sif`` keys, repository roots, data roots,
 the PSF dictionary, the explicit ``tile_ids`` list and the sim/calibration
 knobs -- so a fresh user drives it from config alone, with no hard-coded clone
@@ -85,10 +99,10 @@ _OPERATIONAL_KEYS = {
     "sims_type",
     "branches",
     "shape",
-    "config_dir",
-    "pipeline_config_dir",
     "psf_model",
-    "n_smp",
+    "sp_profile",
+    "sp_jobs",
+    "clean_exposures",
     "extract_script",
     "calibrate_script",
 }
@@ -184,16 +198,21 @@ TILE_IDS = list(IMSIM["tile_ids"])
 SHAPE = IMSIM["shape"]
 MASK_CONFIG = IMSIM["mask_config"]  # e.g. config/calibration/mask_v1.X.9_im_sim.yaml
 PARAMS_TEMPLATE = f"{SPV_REPO}/workflow/image_sims/params_im_sim.py"
-# ShapePipe cfis_image_sims config dir (per-tile/exposure configs + final_cat.param).
-CONFIG_DIR = IMSIM["config_dir"]
-# ShapePipe config dir for the pipeline stage's run_job (``-c`` override; owns
-# the ngmix ini and thus METACAL_PSF).  Empty -> run_job's default.  See
-# config.yaml.
-PIPELINE_CONFIG_DIR = IMSIM["pipeline_config_dir"]
+
+# --- ShapePipe processing: ShapePipe's own workflow ------------------------
+# ``sp`` is ShapePipe's workflow launcher; SP_CONFIG_DIR is the config chain it
+# selects for ``input_type: image_sims``.  The merge and extract steps read that
+# dir's ``final_cat.param`` (through the per-sim ``cfis`` link), so the column
+# list and the processing that wrote the columns come from one checkout.
+SP_LAUNCHER = f"{SHAPEPIPE_REPO}/workflow/bin/sp"
+SP_CONFIG_DIR = f"{SHAPEPIPE_REPO}/workflow/config/cfis_image_sims"
+PSF_MODEL = IMSIM["psf_model"]
+SP_PROFILE = IMSIM["sp_profile"]
+SP_JOBS = IMSIM["sp_jobs"]
+CLEAN_EXPOSURES = bool(IMSIM["clean_exposures"])
 
 # ShapePipe scripts live in the ShapePipe repo (also baked into its image).
 CREATE_FINAL_CAT = f"{SHAPEPIPE_REPO}/scripts/python/create_final_cat.py"
-RUN_JOB = f"{SHAPEPIPE_REPO}/scripts/sh/run_job_sp_canfar_v2.0.bash"
 # Extract/calibrate run from the sp_validation *repo* checkout (bind-mounted),
 # not the baked copies: the container tracks the branch but lags it, and the
 # image-sims path needs branch-only fixes (star-catalogue-optional extract,
@@ -204,49 +223,76 @@ CALIBRATE = IMSIM["calibrate_script"]
 COMPUTE_M_BIAS = f"{SPV_REPO}/scripts/compute_m_bias_image_sims.py"
 
 # --- container exec prefixes ----------------------------------------------
-# One prefix *shape* for every stage -- two instances, one per image.  Three
-# env injections make the on-disk branch
-# code and the sim PSF win over the image's baked copies:
+# One prefix *shape* for every containerised stage (all but im_shapepipe) --
+# two instances, one per image.  The env injections make the on-disk branch
+# code win over the image's baked copies:
 #
 #   * PYTHONPATH prepends BOTH repos' ``src`` (ShapePipe first, then
 #     sp_validation), so Python resolves the worktree build before
 #     ``/app``/``/sp_validation`` -- the local-testing counterpart of the
 #     git-ref deps, letting the branch code run without an image rebuild.  This
-#     covers the Python *packages* only: the bash entry points (run_job) and
-#     the ShapePipe/sp_validation *scripts* are still invoked at the repo paths
-#     resolved from config (RUN_JOB, CREATE_FINAL_CAT, EXTRACT_INFO, ...), not
-#     shadowed by PYTHONPATH.
-#   * PSF_DICT points the fake_psf module (PSF_DICT_PATH = $PSF_DICT, expanded
-#     via getexpanded) at this run's PSF dictionary.
+#     covers the Python *packages* only: the ShapePipe/sp_validation *scripts*
+#     are still invoked at the repo paths resolved from config
+#     (CREATE_FINAL_CAT, EXTRACT_INFO, ...), not shadowed by PYTHONPATH.
 #
-# The SLURM env vars are stripped (``env -u ...``) so that when the ShapePipe
-# pipeline stage's OpenMPI initialises inside the image it does not try to
-# attach to the host SLURM launcher (cf. apptainer_noslurm.sh).  The strip is
-# harmless for the pure-Python sp_validation stages, so one prefix serves all.
+# The SLURM env vars are stripped (``env -u ...``) so that an MPI stack
+# initialising inside the image does not try to attach to the host SLURM
+# launcher (cf. apptainer_noslurm.sh); harmless for these pure-Python stages.
 #
 # ``OMP_NUM_THREADS=1`` is injected here, at the ``apptainer exec`` call, and
-# not left to the SLURM profile.  The chain is MPI-free: Snakemake fans out one
-# job per branch x tile and each job's parallelism is ShapePipe's own internal
-# multiprocessing (``-N n_smp``), so the OpenMP/BLAS thread pool inside the
-# container must be pinned to 1 to avoid oversubscription.  The SLURM profile
-# cannot pin it reliably: the slurm executor submits with ``--export=ALL``,
-# which propagates the *driver's* ambient environment -- but a Snakemake
-# profile only sets CLI flags, never the driver's own env, so an
+# not left to the SLURM profile: the slurm executor submits with
+# ``--export=ALL``, which propagates the *driver's* ambient environment, and a
+# Snakemake profile only sets CLI flags, never the driver's own env, so an
 # ``OMP_NUM_THREADS`` there would depend on the operator having exported it by
-# hand (the implicit, uncommitted state the "one run command" is meant to
-# retire).  Injecting it on the ``apptainer exec`` line puts it where the
-# compute actually runs -- inside the container, independent of the driver's
-# env -- the same lever this prefix already uses for PYTHONPATH/PSF_DICT.
+# hand.  Injecting it on the ``apptainer exec`` line puts it where the compute
+# actually runs.  (ShapePipe's own profile pins it the same way for the jobs
+# ``sp`` submits.)
 _EXEC_PREFIX = (
     "env -u SLURM_JOBID -u SLURM_JOB_ID -u SLURM_PROCID "
     f"apptainer exec --bind {BINDS} "
     f"--env PYTHONPATH={SHAPEPIPE_REPO}/src:{SPV_REPO}/src "
-    f"--env PSF_DICT={PSF_DICT} --env OMP_NUM_THREADS=1 "
+    "--env OMP_NUM_THREADS=1 "
 )
 EXEC = _EXEC_PREFIX + SIF  # sp_validation stages
-EXEC_PIPELINE = _EXEC_PREFIX + SIF_PIPELINE  # ShapePipe stages
+EXEC_PIPELINE = _EXEC_PREFIX + SIF_PIPELINE  # ShapePipe merge stage
 
-JOB_MASK = sum([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048])
+
+def sp_run_config(sim):
+    """ShapePipe workflow run config for one shear branch (one ``sp`` campaign).
+
+    It REPLACES ShapePipe's committed ``workflow/config.yaml`` (``bin/sp``'s
+    ``SP_RUN_CONFIG``), so every key the campaign needs is stated; processing
+    knobs this config does not state (``ngmix_chunks``) take the ShapePipe
+    Snakefile's defaults, never a copy here.  ``clean_tiles`` stays off: the
+    merge reads each tile's make_cat output from the tile store.  ``clean``
+    (rolling exposure-store reclamation) is ``clean_exposures`` -- a 40-tile
+    branch touches ~300 exposures at ~8 GB of stores each.
+    """
+    run_dir = f"{GRIDS_BASE}/{sim}"
+    cfg = {
+        "input_type": "image_sims",
+        "psf_model": PSF_MODEL,
+        "tile_list": f"{run_dir}/tiles_{sim}.txt",
+        "inputs": {
+            "tiles": f"{INPUT_SIMS_BASE}/{sim}/images/SP_tiles",
+            "exposures": f"{INPUT_SIMS_BASE}/{SIM_EXP_BASE[sim]}/images/SP_exp",
+        },
+        "container": SIF_PIPELINE,
+        "outputs": {
+            "run_dir": run_dir,
+            "index_db": f"{run_dir}/index/run_index.sqlite",
+        },
+        "clean": CLEAN_EXPOSURES,
+        "clean_tiles": False,
+        "clean_ignore_tiles": [],
+    }
+    if PSF_MODEL == "fake":
+        cfg["psf_dict"] = PSF_DICT
+    return cfg
+
+
+localrules:
+    im_shapepipe,
 
 
 wildcard_constraints:
@@ -267,13 +313,9 @@ rule im_init_all:
         expand(f"{GRIDS_BASE}/{{sim}}/params.py", sim=SIMS),
 
 
-rule im_pipeline_all:
+rule im_shapepipe_all:
     input:
-        expand(
-            f"{GRIDS_BASE}/{{sim}}/logs/pipeline_{{tile}}.done",
-            sim=SIMS,
-            tile=TILE_IDS,
-        ),
+        expand(f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml", sim=SIMS),
 
 
 rule im_merge_all:
@@ -330,18 +372,14 @@ rule im_manifest:
 
 
 rule im_init:
-    """Stage per-sim run directory: params.py, mask config, ShapePipe configs,
-    and the raw SKiLLS image inputs.
+    """Stage per-sim run directory: params.py, mask config, tile list, and the
+    ``cfis`` link to ShapePipe's image-sims config dir.
 
     ``params_im_sim.py`` derives the field name from the directory basename, so
     the same template serves every sim; ``config_mask.yaml`` and ``cfis`` are
     symlinks the downstream calibration and merge steps read from cwd.
-
-    ``input_tiles``/``input_exp`` are top-level symlinks to the raw SKiLLS tile
-    and exposure images; ShapePipe's ``get_images_runner`` resolves them via
-    ``$SP_DIR/input_{tiles,exp}`` (``$SP_DIR`` is the run dir). ``run_job`` does
-    not stage these, so ``im_init`` must -- this is what makes ``im_pipeline``
-    runnable from raw images, not just from pre-staged intermediates.
+    ``tiles_{sim}.txt`` is both the ShapePipe campaign's ``tile_list`` and the
+    tile-ID file ``params.py`` names for the found/missing-tile check.
     """
     input:
         # Tracked so that editing the params template or mask config re-stages
@@ -352,73 +390,108 @@ rule im_init:
     output:
         params=f"{GRIDS_BASE}/{{sim}}/params.py",
         mask=f"{GRIDS_BASE}/{{sim}}/config_mask.yaml",
+        tiles=f"{GRIDS_BASE}/{{sim}}/tiles_{{sim}}.txt",
     params:
-        config_dir=CONFIG_DIR,
-        run_dir=lambda wc: f"{GRIDS_BASE}/{wc.sim}",
+        config_dir=SP_CONFIG_DIR,
         cfis=lambda wc: f"{GRIDS_BASE}/{wc.sim}/cfis",
-        sim_tiles=lambda wc: f"{INPUT_SIMS_BASE}/{wc.sim}/images/SP_tiles",
-        # SIM_EXP_BASE maps the tile sim to its exposure-source sim (see above).
-        sim_exp=lambda wc: f"{INPUT_SIMS_BASE}/{SIM_EXP_BASE[wc.sim]}/images/SP_exp",
+        tile_ids=" ".join(TILE_IDS),
     shell:
-        # cfis / input_tiles / input_exp are stable read-only symlinks (used by
-        # get_images, merge, extract); created here but not tracked as outputs,
-        # which snakemake will not accept for a symlink/directory.
+        # cfis is a stable read-only symlink (used by merge and extract);
+        # created here but not tracked as an output, which snakemake will not
+        # accept for a symlink to a directory.
         "mkdir -p $(dirname {output.params}) && "
         "cp {input.template} {output.params} && "
         "ln -sf {input.mask_src} {output.mask} && "
         "ln -sfT {params.config_dir} {params.cfis} && "
-        "ln -sfT {params.sim_tiles} {params.run_dir}/input_tiles && "
-        "ln -sfT {params.sim_exp} {params.run_dir}/input_exp"
+        "printf '%s\\n' {params.tile_ids} > {output.tiles}"
 
 
-rule im_pipeline:
-    """Run ShapePipe on one simulated tile (ShapePipe stage).
+rule im_shapepipe:
+    """Run ShapePipe's own workflow over one shear branch (ShapePipe stage).
 
-    Delegates the module DAG to ShapePipe's own job runner; the sentinel log
-    marks tile completion for the merge step.  This is the compute-heavy,
-    MPI-bearing stage.
+    Writes the branch's ShapePipe run config (``sp_run_config``) and runs
+    ``sp run`` on it: one campaign, PREPARE then COMPUTE, whose jobs ``sp``
+    submits to SLURM itself through ShapePipe's profile ``sp_profile``.  That
+    is why this is a localrule -- it is a scheduler, not a compute job.  The
+    campaign resumes: rerunning after a failure re-does only incomplete units.
+
+    The output is the campaign record: which ShapePipe checkout and image
+    produced the per-tile catalogues, and how many of the requested tiles have
+    a ``final_cat``.  ``sp run`` exits non-zero if any tile failed (keep-going
+    lets the rest finish), and so does this rule; read the campaign's
+    ``index/run_report.json`` for the per-stage verdicts.
     """
     input:
-        # ``params.py`` is a *tracked* output of ``im_init``, so this one input
-        # supplies the im_init -> im_pipeline edge. The ``cfis`` symlink the
-        # shell reads (via {RUN_JOB}) is created by that same im_init shell block
-        # as an *untracked* side effect -- no rule declares it as an output
-        # (snakemake will not track a symlink/directory output). Declaring it an
-        # input here therefore asked the DAG for a file no rule produces: on a
-        # fresh grids_base it aborted the build with MissingInputException before
-        # any job ran. It is safe to drop -- cfis exists whenever params does,
-        # since im_init stages both together.
-        params=f"{GRIDS_BASE}/{{sim}}/params.py",
+        tiles=f"{GRIDS_BASE}/{{sim}}/tiles_{{sim}}.txt",
     output:
-        done=touch(f"{GRIDS_BASE}/{{sim}}/logs/pipeline_{{tile}}.done"),
+        record=f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml",
+    log:
+        f"{GRIDS_BASE}/{{sim}}/logs/sp_run.log",
     params:
-        run_dir=lambda wc: f"{GRIDS_BASE}/{wc.sim}",
-        psf=IMSIM["psf_model"],
-        n_smp=IMSIM["n_smp"],
-        config_flag=f"-c {PIPELINE_CONFIG_DIR}" if PIPELINE_CONFIG_DIR else "",
-    resources:
-        # measured: job uses ~1 core (eff 0.9); post-#843 MaxRSS ~72MB accounting / 2.3GB live-peak; 2cpu/4GB packs ~512 jobs on the usable partition
-        mem_mb=4000,
-        cpus_per_task=2,
-        runtime=720,
-    shell:
-        "cd {params.run_dir} && "
-        "{EXEC_PIPELINE} bash {RUN_JOB} "
-        "-e {wildcards.tile} -t image_sims -j {JOB_MASK} "
-        "-p {params.psf} -N {params.n_smp} {params.config_flag}"
+        run_config=lambda wc: sp_run_config(wc.sim),
+        run_config_path=lambda wc: f"{GRIDS_BASE}/{wc.sim}/shapepipe_run.yaml",
+    run:
+        import subprocess
+
+        import yaml
+
+        with open(params.run_config_path, "w") as fh:
+            fh.write(
+                "# ShapePipe workflow run config, written by sp_validation's\n"
+                "# im_shapepipe rule (workflow/rules/image_sims.smk).\n"
+            )
+            yaml.safe_dump(params.run_config, fh, sort_keys=False)
+        env = (
+            f"SP_PROFILE={SP_PROFILE} "
+            f"SP_RUN_CONFIG={params.run_config_path}"
+        )
+        shell(f"{env} {SP_LAUNCHER} run --jobs {SP_JOBS} > {log} 2>&1")
+
+        def _out(*cmd):
+            return subprocess.run(
+                cmd, capture_output=True, text=True, check=True
+            ).stdout.strip()
+
+        run_dir = params.run_config["outputs"]["run_dir"]
+        tiles = [t.strip() for t in open(input.tiles) if t.strip()]
+        final_cats = [
+            t for t in tiles
+            if os.path.exists(f"{run_dir}/tiles/{t[:2]}/{t}/final_cat-{t}.fits")
+        ]
+        record = {
+            "run_config": params.run_config_path,
+            "sp_profile": SP_PROFILE,
+            "shapepipe": {
+                "repo": SHAPEPIPE_REPO,
+                "branch": _out("git", "-C", SHAPEPIPE_REPO, "rev-parse", "--abbrev-ref", "HEAD"),
+                "commit": _out("git", "-C", SHAPEPIPE_REPO, "rev-parse", "HEAD"),
+                "dirty": bool(_out("git", "-C", SHAPEPIPE_REPO, "status", "--porcelain")),
+            },
+            # sp's own image resolution (sandbox > cached SIF > ``container:``),
+            # i.e. the image the campaign's jobs actually ran in.
+            "image": _out(
+                "env", f"SP_PROFILE={SP_PROFILE}",
+                f"SP_RUN_CONFIG={params.run_config_path}",
+                SP_LAUNCHER, "container", "resolve",
+            ).splitlines()[-1],
+            "run_report": f"{run_dir}/index/run_report.json",
+            "n_tiles": len(tiles),
+            "n_final_cats": len(final_cats),
+        }
+        with open(output.record, "w") as fh:
+            yaml.safe_dump(record, fh, sort_keys=False)
 
 
 rule im_merge:
     """Merge per-tile ShapePipe catalogues into final_cat_{sim}.hdf5.
 
     ``create_final_cat.py`` lives in the ShapePipe repo/image; run in image_sims
-    mode (``-I``) it walks the per-tile output under the run directory.
+    mode (``-I``) it walks the campaign's tile stores under the run directory
+    (``tiles/<shard>/<tile>/output/run_sp_tile_Mc``), selecting the columns in
+    ShapePipe's image-sims ``final_cat.param``.
     """
     input:
-        tiles=expand(
-            f"{GRIDS_BASE}/{{{{sim}}}}/logs/pipeline_{{tile}}.done",
-            tile=TILE_IDS,
-        ),
+        record=f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml",
     output:
         cat=f"{GRIDS_BASE}/{{sim}}/final_cat_{{sim}}.hdf5",
     params:

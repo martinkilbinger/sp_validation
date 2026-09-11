@@ -59,12 +59,13 @@ executor: slurm
 #     *per node*, and apptainer crashes ("can't start new thread") beyond ~4
 #     concurrent jobs on a 48-core node.  Requesting 12 CPUs/job holds SLURM to
 #     ~4 jobs per 48-core node, under the ceiling.  Dropping this to 1 would let
-#     SLURM pack ~48 jobs onto a node and crash the compute-heavy im_pipeline
-#     stage (which inherits this default -- it sets mem/runtime but not cpus).
+#     SLURM pack ~48 jobs onto a node.  (The compute-heavy ShapePipe
+#     processing is not submitted under this profile: im_shapepipe runs
+#     ShapePipe's own workflow, whose jobs follow ShapePipe's profile.)
 #
 #   * After launching a real fan-out, VERIFY the request actually landed:
 #     ``squeue -u $USER -o "%C %l"`` must show 12 (CPUs) and the wall clock you
-#     intended (e.g. 12:00:00 for im_pipeline).  A silently-misparsed runtime or
+#     intended (e.g. 1:00:00 for the default).  A silently-misparsed runtime or
 #     cpus shows up here before it wastes a queue slot.
 default-resources:
   slurm_account: "cusers"
