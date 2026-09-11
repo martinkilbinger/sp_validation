@@ -453,7 +453,12 @@ rule im_shapepipe:
             f"SP_PROFILE={SP_PROFILE} "
             f"SP_RUN_CONFIG={params.run_config_path}"
         )
-        shell(f"{env} {SP_LAUNCHER} run --jobs {SP_JOBS} > {log} 2>&1")
+        # Appended, not truncated: a retry (or a relaunch of the campaign)
+        # must not erase the log of the attempt that failed.
+        shell(
+            f"echo \"=== sp run $(date -Iseconds) ===\" >> {log} && "
+            f"{env} {SP_LAUNCHER} run --jobs {SP_JOBS} >> {log} 2>&1"
+        )
 
         def _out(*cmd):
             return subprocess.run(
