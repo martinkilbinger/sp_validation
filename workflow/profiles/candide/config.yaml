@@ -34,6 +34,9 @@
 #     set none.
 
 executor: slurm
+# Concurrent SLURM jobs.  Required: snakemake refuses remote execution without
+# a job cap ("maximum number of parallel jobs ... has to be specified").
+jobs: 50
 
 # Cluster policy applied to every job unless a rule overrides it.  The excludes
 # are the flaky/no-internet candide nodes (n17 mount issues, n09 no internet,
