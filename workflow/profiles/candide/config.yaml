@@ -79,8 +79,10 @@ default-resources:
 
 # Give an appearing output file a moment on candide's automounted filesystems
 # before Snakemake calls a job failed for a missing output, and retry a job
-# once on transient node failure.
-latency-wait: 5
+# once on transient node failure.  5 s was too short for a fresh run dir on
+# /n23data1 (outputs a compute node wrote were "missing locally, parent dir not
+# present" on the head); 60 s matches ShapePipe's candide profile.
+latency-wait: 60
 retries: 1
 
 # Keep the SLURM logs of successful jobs (candide debugging), and rerun a job
