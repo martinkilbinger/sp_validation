@@ -427,6 +427,14 @@ rule im_shapepipe:
         record=f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml",
     log:
         f"{GRIDS_BASE}/{{sim}}/logs/sp_run.log",
+    resources:
+        # One unit per concurrent campaign; the profile caps the total
+        # (``resources: sp_campaign=N``).  The cap is a DISK bound: a branch's
+        # exposure stores (~8 GB each, ~300 per 40-tile branch) are reclaimed
+        # only once every tile reading them has its vignets, and snakemake
+        # runs the ready exposure jobs first, so a campaign can hold ~2 TB at
+        # its peak.
+        sp_campaign=1,
     params:
         run_config=lambda wc: sp_run_config(wc.sim),
         run_config_path=lambda wc: f"{GRIDS_BASE}/{wc.sim}/shapepipe_run.yaml",

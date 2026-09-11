@@ -79,10 +79,10 @@ image_sims:
   # ShapePipe profile (shapepipe_repo/profiles/<name>) that submits the
   # campaign's SLURM jobs.  [operational]
   sp_profile: candide
-  # Concurrent SLURM jobs per branch campaign (`sp run --jobs`); the branches
-  # run as concurrent localrules, so the cluster sees up to 5x this.
-  # [operational]
-  sp_jobs: 30
+  # Concurrent SLURM jobs per branch campaign (`sp run --jobs`); the profile's
+  # `sp_campaign` resource caps how many branch campaigns run at once, so the
+  # cluster sees up to that many times this.  [operational]
+  sp_jobs: 50
   # Rolling exposure-store reclamation (ShapePipe `clean:`): an exposure's
   # store (~8 GB) is deleted once every tile reading it has its vignets.
   # [operational]
