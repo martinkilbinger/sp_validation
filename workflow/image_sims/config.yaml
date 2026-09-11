@@ -61,7 +61,11 @@ image_sims:
   # sheared branches.  Injected shear is NOT set here -- it is parsed from each
   # branch's basic_info.txt by im_manifest.  [operational]
   branches: ["1z2z", "1p2z", "1m2z", "1z2p", "1z2m"]
-  # Tiles to process: an explicit list, the one tile-input mechanism.
+  # Tiles to process: an explicit list, the one tile-input mechanism.  Leave
+  # out tiles without data: a tile with no detections fails its branch's
+  # ShapePipe campaign, and so im_shapepipe.  In SKiLLS the coadds of grid_1
+  # 248.288, grid_2 259.285, grid_3 265.285 and grid_4 281.281/282.281 are
+  # all zeros, and 1m2z_2's 257.289 is truncated.
   tile_ids: ["233.293", "237.292", "238.292"]
 
   # --- calibration ------------------------------------------------------
@@ -73,8 +77,9 @@ image_sims:
   # that workflow mode.  The config chain is the checkout's
   # workflow/config/cfis_image_sims -- change processing there, not here.
   # PSF model, as ShapePipe's workflow spells it: `fake` (the true simulation
-  # PSF; the star-free *_grid_N sims) or `psfex` / `mccd` (sims with stars:
-  # *_star_grid, non-grid *_N).  [operational]
+  # PSF; the star-free *_grid_N sims) or `psfex` / `mccd` (the sims with
+  # stars: non-grid *_N, tiles from N = 1..4 with exp_num: 5; *_star_grid has
+  # inputs for 1z2z only and gives no m).  [operational]
   psf_model: fake
   # ShapePipe profile (shapepipe_repo/profiles/<name>) that submits the
   # campaign's SLURM jobs.  [operational]

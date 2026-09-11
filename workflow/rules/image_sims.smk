@@ -439,6 +439,7 @@ rule im_shapepipe:
         run_config=lambda wc: sp_run_config(wc.sim),
         run_config_path=lambda wc: f"{GRIDS_BASE}/{wc.sim}/shapepipe_run.yaml",
     run:
+        import json
         import subprocess
 
         import yaml
@@ -471,14 +472,20 @@ rule im_shapepipe:
             t for t in tiles
             if os.path.exists(f"{run_dir}/tiles/{t[:2]}/{t}/final_cat-{t}.fits")
         ]
+        # The code the campaign ran is sp's launch snapshot, not whatever the
+        # checkout holds when the campaign ends (hours later, possibly another
+        # commit): sp records the snapshot's commit and dirty state itself.
+        with open(f"{run_dir}-state/code/snapshot.json") as fh:
+            snapshot = json.load(fh)
         record = {
             "run_config": params.run_config_path,
             "sp_profile": SP_PROFILE,
             "shapepipe": {
-                "repo": SHAPEPIPE_REPO,
-                "branch": _out("git", "-C", SHAPEPIPE_REPO, "rev-parse", "--abbrev-ref", "HEAD"),
-                "commit": _out("git", "-C", SHAPEPIPE_REPO, "rev-parse", "HEAD"),
-                "dirty": bool(_out("git", "-C", SHAPEPIPE_REPO, "status", "--porcelain")),
+                "repo": snapshot["source"],
+                "branch": snapshot["branch"],
+                "commit": snapshot["head"],
+                "dirty": snapshot["dirty"],
+                "snapshot_taken_at": snapshot["taken_at"],
             },
             # sp's own image resolution (sandbox > cached SIF > ``container:``),
             # i.e. the image the campaign's jobs actually ran in.
@@ -568,6 +575,10 @@ rule im_mbias:
         cats=expand(
             f"{GRIDS_BASE}/{{sim}}/shape_catalog_cut_{SHAPE}.fits", sim=SIMS
         ),
+        # The per-branch ShapePipe campaign records, for provenance.
+        campaigns=expand(
+            f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml", sim=SIMS
+        ),
     output:
         results=f"{GRIDS_BASE}/results/m_bias_results.yaml",
     resources:
@@ -629,6 +640,17 @@ rule im_mbias:
             )
             return m.group(1).decode() if m else None
 
+        def _campaign(path):
+            """The provenance half of im_shapepipe's campaign record."""
+            with open(path) as fh:
+                record = yaml.safe_load(fh)
+            return {
+                **record["shapepipe"],
+                "image": record["image"],
+                "n_tiles": record["n_tiles"],
+                "n_final_cats": record["n_final_cats"],
+            }
+
         # Manifest hash: sha256 of the exact bytes im_manifest wrote, so the
         # result records which injected-shear facts it was computed against.
         with open(input.manifest, "rb") as fh:
@@ -640,9 +662,15 @@ rule im_mbias:
                 "branch": _git(params.sp_validation_repo, "rev-parse", "--abbrev-ref", "HEAD"),
                 "commit": _git(params.sp_validation_repo, "rev-parse", "HEAD"),
             },
+            # The checkout the merge stage runs create_final_cat from.
             "shapepipe": {
                 "branch": _git(params.shapepipe_repo, "rev-parse", "--abbrev-ref", "HEAD"),
                 "commit": _git(params.shapepipe_repo, "rev-parse", "HEAD"),
+            },
+            # The code and image each branch's tiles were processed with (sp's
+            # launch snapshot, via im_shapepipe's campaign record).
+            "shapepipe_campaigns": {
+                sim: _campaign(path) for sim, path in zip(SIMS, input.campaigns)
             },
             "containers": {
                 "sif": params.sif,
