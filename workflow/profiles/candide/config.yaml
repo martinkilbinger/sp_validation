@@ -15,8 +15,8 @@
 #
 #   * Container / apptainer settings.  The image-sims rules set
 #     ``container: None`` and own their ``apptainer exec`` call through the
-#     shared ``EXEC`` prefix (one image for every stage, with PYTHONPATH /
-#     PSF_DICT / OMP_NUM_THREADS injected there).  So no
+#     shared ``EXEC`` prefix (one image per half of the chain, with
+#     PYTHONPATH / OMP_NUM_THREADS injected there).  So no
 #     ``software-deployment-method: apptainer`` / ``apptainer-args`` -- those
 #     would wrap a *second*, redundant container around jobs that already run
 #     inside one.
