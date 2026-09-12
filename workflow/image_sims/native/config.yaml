@@ -1,0 +1,22 @@
+# OPERATIONAL defaults for the native image-sims workflow -- committed,
+# shared across users and runs. The .smk files read these bare (never with a
+# literal fallback), so this file is their one home.
+#
+# Everything that changes from run to run or user to user (tile_list, sim,
+# inputs.tiles/inputs.exposures, outputs.run_dir, container) has NO default
+# here: it must come from a run config layered on top via a second
+# --configfile (later ones override earlier ones). See run.example.yaml for
+# the template, and run.sh's -c/--config flag.
+
+psf_model: psfex
+
+# Reclamation (off by default -- a run config opts in explicitly, same
+# convention as the real design's clean:/clean_tiles: keys). clean:
+# reclaims an exposure's store once every consuming tile has its vignets;
+# clean_tiles reclaims a finished tile's whole store once its final_cat
+# exists. See the Snakefile's module docstring for the cascade-avoidance
+# mechanism this depends on (tile_exp_split's ancient()-and-drop cut, and
+# run.sh's --rerun-triggers excluding `input`).
+clean: false
+clean_tiles: false
+clean_ignore_tiles: []

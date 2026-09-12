@@ -1,0 +1,419 @@
+"""Image-sims orchestration, ported onto Cail's native shapepipe_run-per-unit
+design (shapepipe/workflow/{Snakefile,rules/*.smk}, CosmoStat/shapepipe#848).
+
+Being built up step by step, one stage at a time, against ONE reference tile
+(240.291, branch 1z2z_grid_1) before broadening to the full tile list and the
+five sheared branches. Currently covers, end to end:
+  PREPARE: tile_get_images -> tile_uncompress -> tile_find_exposures
+  COMPUTE, exposure chain: exp_get_images -> exp_split (no exp_psf)
+  COMPUTE, tile chain: tile_exp_forest, tile_merge_headers, tile_detect,
+    then {tile_fake_psf, tile_vignets} (parallel, both off tile_detect),
+    tile_ngmix, tile_make_cat (no tile_merge_cats: ngmix is one call, not
+    N chunks -- see config_tile_Ng_batch_psfex_sx.ini)
+
+Like the real design, this is now TWO snakemake invocations, gated by
+SP_PHASE (prepare/compute) -- see below for why: tile_find_exposures'
+output is what tells us which exposures exist, so a single static parse
+can't declare exposure-level rules before that stage has actually run.
+
+Adaptations from the real-data design, and why (see the port plan for the
+full investigation):
+  * Retrieval is symlink, not VOSpace (`-r symlink` in the Gen-2 dispatch);
+    the committed configs already reflect this (config_tile_Git_symlink.ini).
+  * tile_uncompress is FAKED: image-sims weights are already uncompressed, so
+    this rule symlinks the weight into a synthetic
+    run_sp_tile_Uz/uncompress_fits_runner/output/ dir instead of calling
+    shapepipe_run -- but still goes through the same manifest/completeness
+    contract as every other stage, so downstream rules can't tell the
+    difference (mirrors run_job_sp_canfar_v2.0.bash's job-2 special case).
+  * tile_numbers.txt is DASH form ("240-291"), not dot form -- image-sims
+    configs' INPUT_NUMBERING expects it (verified against a completed
+    production tile); real-data's unit_pre writes dot form.
+  * $SP_DIR (the sim root, holding input_tiles/input_exp/cfis) is exported
+    alongside $SP_RUN -- the image-sims configs read $SP_DIR/input_tiles
+    directly, unlike real data's $SP_INPUT_TILES indirection.
+  * Every forked ini under config/cfis_image_sims/ sets RUN_DATETIME=False:
+    the upstream example/cfis_image_sims/*.ini mostly default to True
+    (timestamped run dirs), which the manifest design's fixed-path lookup
+    and unit_pre's `rm -rf $SP_RUN/output/<subdir>` idempotency both require
+    to be False.
+
+  * The index is plain JSON, not sqlite (Cail's build_index.py writes
+    sqlite because DR6 has hundreds of concurrent job re-parses racing to
+    read/write it -- see build_index.py's docstring). At one-tile-to-one-grid
+    scale under local/`--cores` execution there is one writer, so a JSON
+    file under `workflow.is_main_process` is the same guarantee with far
+    less machinery. Revisit if/when this moves to the SLURM executor with
+    per-job re-parses.
+  * No EXP name-mapping table: real data needs one because an exposure's
+    base id ("2605805") differs from its filename ("2605805p"). Image-sims
+    exposure ids ARE the filename base (confirmed: Gen-2's own dispatch
+    comment "2182795p (data) or 208659 (image_sims)"), so `exp_name` is
+    just the wildcard itself -- no index lookup needed for it.
+
+  * tile_fake_psf has no real-data counterpart at all: image sims use a
+    known, injected PSF (fake_psf_runner, reading the tile's own sexcat),
+    not a fitted PSFEx model, so it runs at the TILE level as a sibling of
+    tile_vignets rather than folded into an exposure-level exp_psf.
+  * No tile_merge_cats: the real design concatenates N ngmix chunk
+    catalogues before make_cat reads them; image sims runs ngmix as ONE
+    call over the whole tile (Gen-2 never chunked it), so tile_make_cat
+    reads tile_ngmix's output directly.
+  * PRODUCTS_DIR defaults to RUN_DIR (one root) -- the real design's
+    scratch/persistent split (D5) is a reclaim-at-DR6-scale concern that
+    doesn't apply yet at one-tile-to-one-grid scale.
+
+clean_exposure/clean_tile reuse shapepipe's own workflow/scripts/{clean_exposure,clean_tile}.py
+UNMODIFIED (stdlib-only, pure CLI) -- see rules/exposure.smk and rules/tile.smk.
+The one addition their real-data equivalents needed: tile_exp_split's
+ancient()-and-drop cut for a FINISHED tile's reclaimed exposure edges (see
+tile_exp_split's docstring), and `--rerun-triggers` must exclude `input` for
+that cut to actually suppress reruns (nibi's profile does this; run.sh does
+too) -- otherwise a later invocation that appends tiles sees a since-cleaned
+exposure's vanished manifest as "input files updated" and rebuilds it,
+cascading across every tile that shares it (exposures ARE shared across
+neighbouring tiles here, same as real data -- verified on grid_1).
+
+Not yet ported (later steps): ngmix chunking, node-local staging + group
+fusion -- Phase-3 concerns once this chain is verified correct end to end
+against the Gen-2 reference tile.
+"""
+
+import json
+import os
+from pathlib import Path
+
+from snakemake.exceptions import WorkflowError
+
+# config.yaml carries only OPERATIONAL defaults (safe to share across users
+# and runs, e.g. psf_model) -- see its own header comment. Everything that
+# differs from run to run or user to user (tile_list, sim, inputs, the run
+# dir, the container) has NO default here and must come from a run config
+# layered on top:
+#
+#   snakemake -s Snakefile --configfile config.yaml --configfile my_run.yaml
+#
+# (run.sh does this for you via -c/--config; see run.example.yaml for the
+# template.) Later --configfile args override earlier ones, so a run config
+# never needs to repeat the operational defaults.
+configfile: str(Path(workflow.snakefile).parent / "config.yaml")
+
+_REQUIRED = ("tile_list", "sim", "inputs", "outputs", "container", "psf_dict",
+             "shapepipe_repo")
+_missing = [k for k in _REQUIRED if k not in config]
+if _missing:
+    raise WorkflowError(
+        f"Missing required run-config key(s) {_missing} -- these have no "
+        "default in config.yaml and must be set in a run config passed via "
+        "an extra --configfile (see run.example.yaml, and run.sh -c/--config)."
+    )
+for _k in ("tiles", "exposures"):
+    if _k not in config["inputs"]:
+        raise WorkflowError(f"run config: inputs.{_k} is required")
+if "run_dir" not in config["outputs"]:
+    raise WorkflowError("run config: outputs.run_dir is required")
+
+container: config["container"]
+
+RUN_DIR    = Path(config["outputs"]["run_dir"])
+# One root for now -- see the module docstring's PRODUCTS_DIR note.
+PRODUCTS_DIR = Path(config["outputs"].get("products_dir") or RUN_DIR)
+# Repo-relative, not a config key: the ini chain versions with the rules that
+# set the env vars they interpolate (same reasoning as the real design's "no
+# config_src knob" -- see shapepipe/workflow/README.md).
+CONFIG_DIR = Path(workflow.basedir) / "config" / "cfis_image_sims"
+SCRIPTS    = Path(workflow.basedir) / "scripts"
+INPUTS     = config["inputs"]
+PSF_DICT   = config["psf_dict"]
+# clean_exposure.py / clean_tile.py are reused UNMODIFIED from shapepipe's own
+# workflow (stdlib-only, pure CLI, no dependency on its Snakefile globals or
+# on sqlite -- verified by reading them). No fork needed, unlike
+# completeness.py/build_forest.py.
+SHAPEPIPE_SCRIPTS = Path(config["shapepipe_repo"]) / "workflow" / "scripts"
+
+with open(config["tile_list"]) as f:
+    TILES = [ln.strip() for ln in f if ln.strip()]
+
+# --- sim-root setup (mirrors sp_validation's existing im_init rule) --------
+# Static, tile-independent, idempotent -- done once at parse time rather than
+# as a rule, same as the real Snakefile's own mkdir-at-parse-time bits.
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+for name, target in (("input_tiles", INPUTS["tiles"]),
+                      ("input_exp", INPUTS["exposures"]),
+                      ("cfis", CONFIG_DIR)):
+    link = RUN_DIR / name
+    if not link.is_symlink() or link.resolve() != Path(target).resolve():
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(target, target_is_directory=True)
+
+import sys
+sys.path.insert(0, str(SCRIPTS))
+from completeness_sims import STAGE_DIR                    # noqa: E402
+
+# SP_PHASE gates the index build the same way it does in the real design
+# (shapepipe/workflow/Snakefile): 'prepare' or 'compute', set by the caller
+# (see this repo's README once written; for now: `SP_PHASE=prepare snakemake
+# prepare_all_tiles`, then `SP_PHASE=compute snakemake all`).
+PHASE = os.environ.get("SP_PHASE", "")
+if PHASE not in ("prepare", "compute"):
+    raise WorkflowError(
+        f"SP_PHASE={PHASE!r} must be 'prepare' or 'compute' -- this workflow "
+        "is two invocations, same as the real-data design (see the "
+        "Snakefile's module docstring).")
+
+wildcard_constraints:
+    tile  = r"\d{3}\.\d{3}",
+    exp   = r"\d{6,7}",
+    shard = r"\d{2}",
+
+# --- sharded stores (kept even at one-tile scale, for parity with the
+# real design and so scaling up later is a config change, not a rewrite) ---
+TILE_DIR = str(RUN_DIR / "tiles" / "{shard}" / "{tile}")
+EXP_DIR  = str(RUN_DIR / "exp" / "{shard}" / "{exp}")
+PROD_TILE_DIR = str(PRODUCTS_DIR / "tiles" / "{shard}" / "{tile}")
+
+def tile_dir(tile):
+    return f"{RUN_DIR}/tiles/{tile[:2]}/{tile}"
+
+def exp_dir(exp):
+    return f"{RUN_DIR}/exp/{exp[:2]}/{exp}"
+
+def forest_dir(tile):
+    return f"{tile_dir(tile)}/exp_forest"
+
+def tile_manifest(tile, stage):
+    return f"{tile_dir(tile)}/manifests/{stage}.json"
+
+def exp_manifest(exp, stage):
+    return f"{exp_dir(exp)}/manifests/{stage}.json"
+
+def final_cat(tile):
+    return f"{PRODUCTS_DIR}/tiles/{tile[:2]}/{tile}/final_cat-{tile}.fits"
+
+def tile_dash(tile):
+    return tile.replace(".", "-")
+
+def tile_finished(tile):
+    """True once this tile has published its final catalogue.
+
+    The tile-finished marker AND the cut-the-reclaimed-edges trigger (see
+    tile_exp_split below) -- same as the real design's tile_finished(), and
+    for the same reason: a finished tile has already extracted everything
+    it will ever read from its exposures, so it has no business rebuilding
+    them just because clean_exposure deleted their manifests.
+    """
+    return Path(final_cat(tile)).exists()
+
+
+def tile_exp_split(wc):
+    """This tile's exposures' exp_split manifests -- the DAG edge for every
+    tile-level rule that reads exposure products (through the forest).
+
+    For a FINISHED tile, manifests clean_exposure has already reclaimed are
+    DROPPED from this list rather than declared (and every surviving one is
+    wrapped `ancient()`) -- otherwise a later `sp run`-equivalent invocation
+    that appends tiles would see "my input vanished" on every tile sharing a
+    since-cleaned exposure and rebuild it from scratch, cascading across
+    every spatial neighbour (measured on the real design's own fixture: one
+    damaged tile reached all four in a shared-exposure quad without this
+    cut). See exposure.smk's clean_exposure rule for the write side, and the
+    module docstring on why this also needs `input` out of
+    --rerun-triggers.
+    """
+    paths = [exp_manifest(e, "exp_split") for e in tile_exposures(wc.tile)]
+    if tile_finished(wc.tile):
+        paths = [p for p in paths if Path(p).exists()]
+    return [ancient(p) for p in paths]
+
+# --- parse-time index build + load ------------------------------------
+INDEX_JSON = RUN_DIR / "index.json"
+
+def _build_index():
+    """Read each tile's tile_find_exposures output, write {tile: [exp_ids]}.
+
+    Merges with whatever is already on disk rather than overwriting, so the
+    index ACCUMULATES across invocations the same way the real design's does
+    (appending a tile later does not forget earlier tiles that are not in
+    THIS invocation's tile_list).
+    """
+    index = json.loads(INDEX_JSON.read_text()) if INDEX_JSON.exists() else {}
+    for t in TILES:
+        fe_dir = Path(tile_dir(t)) / "output" / "run_sp_tile_Fe" / \
+            "find_exposures_runner" / "output"
+        matches = sorted(fe_dir.glob("exp_numbers-*.txt")) if fe_dir.is_dir() else []
+        if not matches:
+            continue
+        index[t] = [ln.strip() for ln in matches[0].read_text().splitlines()
+                    if ln.strip()]
+    INDEX_JSON.parent.mkdir(parents=True, exist_ok=True)
+    INDEX_JSON.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n")
+
+if PHASE == "compute" and workflow.is_main_process:
+    _build_index()
+
+TILE_EXP = json.loads(INDEX_JSON.read_text()) if INDEX_JSON.exists() else {}
+
+def tile_exposures(tile):
+    return TILE_EXP.get(tile, [])
+
+TILES_READY = [t for t in TILES if tile_exposures(t)]
+
+if PHASE == "compute" and not TILES_READY:
+    raise WorkflowError(
+        f"No declared tile has an indexed exposure list: 0 of {len(TILES)} "
+        f"ready (index {INDEX_JSON}). Run the prepare phase first: "
+        "SP_PHASE=prepare snakemake prepare_all_tiles")
+
+# --- reclamation (D5-equivalent; see the real design's Snakefile for the
+# full rationale, which is unchanged here) ----------------------------------
+# Off by default (config.yaml); a run config opts in explicitly.
+CLEAN = bool(config.get("clean", False)) and PHASE == "compute"
+CLEAN_TILES = bool(config.get("clean_tiles", False)) and PHASE == "compute"
+CLEAN_IGNORE_TILES = set(config.get("clean_ignore_tiles") or [])
+
+# EXP_TILES: exposure -> every tile in the (accumulating) index that reads
+# it -- the inverse of TILE_EXP. Exposures genuinely are shared across
+# neighbouring tiles here too (verified: exposure 2086271 covers both
+# 240.291 and 239.291 in grid_1), so this is not a real-data-only concern.
+EXP_TILES = {}
+for _t, _exps in TILE_EXP.items():
+    for _e in _exps:
+        EXP_TILES.setdefault(_e, []).append(_t)
+
+def tombstone(exp):
+    return f"{exp_dir(exp)}/cleaned.json"
+
+def tile_tombstone(tile):
+    return f"{tile_dir(tile)}/cleaned.json"
+
+def exp_consumers(exp):
+    return EXP_TILES.get(exp, [])
+
+def clean_consumers(exp):
+    return sorted(t for t in exp_consumers(exp) if t not in CLEAN_IGNORE_TILES)
+
+def clean_targets():
+    """Exposures eligible for reclamation THIS invocation: every consuming
+    tile is either out of this run's scope (its vignets can't build here) or
+    already has its tile_vignets manifest on disk. See exposure.smk's
+    clean_exposure rule -- this feeds `rule all`, not the clean rule's own
+    `input:` (which stays lambda wc, per-exposure, for the ordering edge)."""
+    if not CLEAN:
+        return []
+    out = []
+    for exp, tiles in EXP_TILES.items():
+        cons = clean_consumers(exp)
+        if all(t in READY_SET or Path(tile_manifest(t, "tile_vignets")).exists()
+               for t in cons):
+            out.append(tombstone(exp))
+    return sorted(out)
+
+def clean_tile_targets():
+    """In-scope finished tiles eligible for whole-store reclamation. No
+    eligibility test needed (a tile has no consumer outside itself)."""
+    if not CLEAN_TILES:
+        return []
+    return sorted(tile_tombstone(t) for t in TILES_READY)
+
+READY_SET = set(TILES_READY)
+
+_THREAD_CAPS = " ".join(
+    f"{k}={v}" for k, v in (
+        ("OMP_NUM_THREADS", 1), ("OPENBLAS_NUM_THREADS", 1),
+        ("MKL_NUM_THREADS", 1), ("NUMEXPR_NUM_THREADS", 1)))
+
+
+def unit_pre(stage, unit, *, exp_name=None, forest=None, pre_run=()):
+    """The image-sims unit-furniture + environment prologue, as bash.
+
+    See shapepipe/workflow/Snakefile's unit_pre for the real-data original;
+    the differences are in this file's module docstring. `unit` is a tile ID
+    for a tile-level stage, an exposure base id for an exposure-level one --
+    STAGE_DIR says which. `forest`, when given, exports $SP_EXP (the
+    per-tile exposure symlink view configs scan for multi-epoch products).
+    """
+    level, subdir = STAGE_DIR[stage]
+    work = tile_dir(unit) if level == "tile" else exp_dir(unit)
+    lines = [
+        "set -euo pipefail",
+        f"export SP_RUN='{work}'",
+        f"export SP_DIR='{RUN_DIR}'",
+        f"export SP_CONFIG='{CONFIG_DIR}'",
+        f"export {_THREAD_CAPS}",
+        'mkdir -p "$SP_RUN/output" "$SP_RUN/manifests" "$SP_RUN/logs"',
+    ]
+    if forest:
+        lines.append(f"export SP_EXP='{forest}'")
+    if level == "tile":
+        lines.append(
+            f"printf '%s\\n' '{tile_dash(unit)}' > \"$SP_RUN/tile_numbers.txt\"")
+    else:
+        # The pseudo-Fe file exp_get_images' config reads as its
+        # find_exposures_runner input -- same mechanism (and same path) as
+        # the real design's unit_pre, and as Gen-2's init_exp_work_dir.
+        fe = "$SP_RUN/output/run_sp_tile_Fe/find_exposures_runner/output"
+        lines += [f'mkdir -p "{fe}"',
+                  f"printf '%s\\n' '{exp_name or unit}' > \"{fe}/exp_numbers-000-000.txt\""]
+    lines += list(pre_run)
+    lines += [
+        f'rm -rf "$SP_RUN/output/{subdir}"',
+        # ShapePipe's own run-history log ($SP_RUN/output/log_run_sp.txt)
+        # gets one line appended per shapepipe_run call and is NEVER
+        # cleared by the rm -rf above (it lives one level up, shared by
+        # every stage in this $SP_RUN). A rerun of this stage -- a retry,
+        # a resume, iterating during development -- then leaves TWO
+        # entries for run_sp_tile_<X>, and any OTHER stage whose config
+        # references this one by exact name (not `last:`) fails with
+        # "More than one run found matching search string" even though
+        # only one output directory exists. Prune this stage's own lines
+        # before every run so reruns can never accumulate a duplicate.
+        f'[ -f "$SP_RUN/output/log_run_sp.txt" ] && '
+        f'grep -vF "$SP_RUN/output/{subdir} " "$SP_RUN/output/log_run_sp.txt" '
+        f'> "$SP_RUN/output/.log_run_sp.tmp" || true',
+        '[ -f "$SP_RUN/output/.log_run_sp.tmp" ] && '
+        'mv "$SP_RUN/output/.log_run_sp.tmp" "$SP_RUN/output/log_run_sp.txt" || true',
+        'cd "$SP_RUN"',
+    ]
+    return "\n".join(lines)
+
+
+def sp_shell(stage, config_name, *, post=""):
+    """The rule's shell string: prologue, one shapepipe_run, one completeness
+    check. See shapepipe/workflow/Snakefile's sp_shell for the pattern this
+    mirrors. `post` is extra bash between the check and `exit $rc`
+    (tile_make_cat uses it to publish final_cat, guarded on rc)."""
+    return (
+        "{params.pre}\n"
+        "rc=0\n"
+        f"shapepipe_run -c \"$SP_CONFIG/{config_name}\" || rc=$?\n"
+        f"python {SCRIPTS}/completeness_sims.py check {stage} {{output.manifest}}"
+        " --log {log} --job-rc \"$rc\" || rc=1\n"
+        f"{post}"
+        "exit $rc\n"
+    )
+
+
+include: "rules/prepare.smk"
+include: "rules/exposure.smk"
+include: "rules/tile.smk"
+
+localrules: all, prepare_all_tiles, clean_exposure, clean_tile
+
+# Invocation 2 (SP_PHASE=compute): everything that needs the index. Declared
+# FIRST so it is snakemake's implicit default target -- matching the
+# real-data Snakefile's ordering, and why: a bare `snakemake` with no target
+# under SP_PHASE=compute must build the compute DAG, not silently re-target
+# prepare_all_tiles because it happened to be declared first.
+rule all:
+    input:
+        [final_cat(t) for t in TILES_READY],
+        clean_targets(),
+        clean_tile_targets(),
+
+# Invocation 1 (SP_PHASE=prepare): the static per-tile DAG. Always named
+# explicitly on the command line (`snakemake ... prepare_all_tiles`), never
+# relied on as a default target.
+rule prepare_all_tiles:
+    input:
+        [tile_manifest(t, "tile_find_exposures") for t in TILES]

@@ -1,0 +1,44 @@
+# Template for a run config -- copy this OUTSIDE the repo (e.g. into your own
+# run dir: ~/v2.0/image_sims/new_workflow/run.yaml) and edit every value
+# below, then point run.sh at it:
+#
+#   ./run.sh prepare -c ~/v2.0/image_sims/new_workflow/run.yaml
+#   ./run.sh compute -c ~/v2.0/image_sims/new_workflow/run.yaml
+#
+# Nothing here has a default in config.yaml -- these are exactly the values
+# that differ from run to run / user to user, so they don't belong tracked
+# in git under sp_validation.
+
+# One tile per line, "IDra.IDdec". Also keep this file itself outside the
+# repo (e.g. beside your run config) -- see tiles.example.txt.
+tile_list: /path/to/your/tiles.txt
+
+# The sim branch this campaign covers. Each branch is its own independent
+# SKiLLS image tree -- no cross-branch exposure sharing, so each branch
+# wants its own run config / run_dir like this one.
+sim: 1z2z_grid_1
+
+inputs:
+  tiles: /n09data/hervas/skills_out/1z2z_grid_1/images/SP_tiles
+  exposures: /n09data/hervas/skills_out/1z2z_grid_1/images/SP_exp
+
+outputs:
+  run_dir: /path/to/your/run/dir
+
+# Currently the shared pipeline container (see my_config_grid_1.yaml's
+# sif_pipeline) -- override if you're testing your own image build.
+container: /n17data/cdaley/containers/shapepipe_im_sims-runtime.sif
+
+# Pickled PSF dictionary read by tile_fake_psf (the known, injected PSF
+# image sims use instead of a fitted PSFEx model).
+psf_dict: /home/hervas/fhervas/workdir_skills/input/psf_files/Full_psf_dict.pickle
+
+# Used to call shapepipe/workflow/scripts/{clean_exposure,clean_tile}.py
+# unmodified (see config.yaml for the clean:/clean_tiles: switches).
+shapepipe_repo: /n17data/mkilbing/astro/repositories/github/shapepipe
+
+# Reclamation is off in config.yaml's defaults; opt in here if disk matters
+# for this run (it does once you're past one tile -- exposures ARE shared
+# across neighbouring tiles).
+# clean: true
+# clean_tiles: true
