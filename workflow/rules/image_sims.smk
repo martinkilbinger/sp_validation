@@ -103,6 +103,7 @@ _OPERATIONAL_KEYS = {
     "sp_profile",
     "sp_jobs",
     "clean_exposures",
+    "tile_store_root",
     "extract_script",
     "calibrate_script",
 }
@@ -210,6 +211,11 @@ PSF_MODEL = IMSIM["psf_model"]
 SP_PROFILE = IMSIM["sp_profile"]
 SP_JOBS = IMSIM["sp_jobs"]
 CLEAN_EXPOSURES = bool(IMSIM["clean_exposures"])
+# Where each tile_shape group's vignette store lives (ShapePipe's
+# ``tile_store_root``; ``sp run`` binds it to /local/scratch).  None keeps the
+# profile's node-local bind -- and keeps the key out of the run config, so
+# campaigns launched before it existed see the same params.
+TILE_STORE_ROOT = IMSIM["tile_store_root"]
 
 # ShapePipe scripts live in the ShapePipe repo (also baked into its image).
 CREATE_FINAL_CAT = f"{SHAPEPIPE_REPO}/scripts/python/create_final_cat.py"
@@ -288,6 +294,8 @@ def sp_run_config(sim):
     }
     if PSF_MODEL == "fake":
         cfg["psf_dict"] = PSF_DICT
+    if TILE_STORE_ROOT:
+        cfg["tile_store_root"] = TILE_STORE_ROOT
     return cfg
 
 

@@ -92,6 +92,13 @@ image_sims:
   # store (~8 GB) is deleted once every tile reading it has its vignets.
   # [operational]
   clean_exposures: true
+  # Where each tile's ShapePipe vignette store lives (ShapePipe run-config
+  # `tile_store_root`, bound to /local/scratch by `sp run`).  null keeps the
+  # profile's node-local store -- on candide the node's 31 GB /tmp, which
+  # dense star-sim tiles (~5 GB each) and failed groups' orphans fill, failing
+  # every later tile group on that node.  Set a shared directory for the star
+  # sims (all branches and runs can share one root).  [operational]
+  tile_store_root: null
   # Extract/calibrate scripts run from the sp_validation repo checkout (branch
   # code, not the baked copies).  Point elsewhere for a different checkout.
   # [operational]
