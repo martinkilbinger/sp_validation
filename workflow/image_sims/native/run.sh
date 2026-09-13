@@ -46,6 +46,15 @@ RUN_CONFIG=$(readlink -f "$RUN_CONFIG")
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# NEVER /tmp: it's a small node-local disk shared by every job/user on that
+# node (candide policy -- see ~/dev/felt/AGENTS.md's "Scratch and temporary
+# files on CANDIDE"); a stray file there can starve someone else's job, and
+# this runs on the LOGIN node besides. These batch scripts/logs are tiny and
+# short-lived (removed at the end of run_phase) -- .batch/ here, on network
+# storage, is gitignored.
+BATCH_DIR="$(pwd)/.batch"
+mkdir -p "$BATCH_DIR"
+
 # --- cluster / container settings, shared by both phases -------------------
 PARTITION=comp
 ACCOUNT=cusers
@@ -84,7 +93,7 @@ run_phase() {
   echo "=== SP_PHASE=$phase (config: $RUN_CONFIG) ==="
 
   local batch_script logfile
-  batch_script=$(mktemp "/tmp/im_sims_${phase}_XXXXXX.sh")
+  batch_script=$(mktemp -p "$BATCH_DIR" "im_sims_${phase}_XXXXXX.sh")
   logfile="${batch_script%.sh}.log"
   cat > "$batch_script" <<EOF
 #!/usr/bin/env bash
