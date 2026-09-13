@@ -46,13 +46,21 @@ RUN_CONFIG=$(readlink -f "$RUN_CONFIG")
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# NEVER /tmp: it's a small node-local disk shared by every job/user on that
-# node (candide policy -- see ~/dev/felt/AGENTS.md's "Scratch and temporary
-# files on CANDIDE"); a stray file there can starve someone else's job, and
-# this runs on the LOGIN node besides. These batch scripts/logs are tiny and
-# short-lived (removed at the end of run_phase) -- .batch/ here, on network
-# storage, is gitignored.
-BATCH_DIR="$(pwd)/.batch"
+# NOT /tmp (small node-local disk shared by every job/user on the node --
+# see ~/CLAUDE.md's "Scratch and temporary files on CANDIDE"), and NOT
+# node-local /scratch either, despite that section's per-job pattern: this
+# script is created on the LOGIN node before the job exists, and its log is
+# written FROM whichever compute node SLURM schedules the job on -- and
+# login-node /scratch is NOT visible there (verified empirically: a probe
+# job's own stdout file and a file it tried to write both silently failed
+# to appear). /scratch is the right tool for a job's own intermediates,
+# computed and consumed on the one node that owns them; it's the wrong tool
+# for something that must be visible before the job exists and from a node
+# not yet chosen. That leaves network storage -- CLAUDE.md's own fallback
+# ("anything that must survive the job goes to /n*data*/$USER/...") -- and
+# NOT the repository directory either (same doc: "never write test outputs
+# into the repository directory"), hence a dotdir outside the checkout.
+BATCH_DIR="/n17data/$USER/.im_sims_batch"
 mkdir -p "$BATCH_DIR"
 
 # --- cluster / container settings, shared by both phases -------------------
