@@ -66,30 +66,17 @@ mkdir -p "$BATCH_DIR"
 # --- cluster / container settings, shared by both phases -------------------
 PARTITION=comp
 ACCOUNT=cusers
-EXCLUDE=n17,n09,n36            # flaky candide nodes (n17 mount issues, n09 no
-                                # internet, n36) -- matches sp_validation's
-                                # own workflow/profiles/candide/config.yaml
+# Flaky candide nodes: n17 mounts, n09 no internet, n23 hung jobs, n36.
+EXCLUDE=n09,n17,n23,n36
 BIND=/home,/scratch,/automnt,/n17data,/n23data1,/n09data
 SHAPEPIPE_SRC=/n17data/mkilbing/astro/repositories/github/shapepipe/src
 
 APPTAINER_ARGS="--cleanenv --bind $BIND --env PYTHONPATH=$SHAPEPIPE_SRC"
 
 # --- per-phase resources -----------------------------------------------------
-# PREPARE is three light rules per tile (Git/Uz/Fe). COMPUTE now runs the
-# WHOLE exposure + tile chain for the WHOLE tile list in one srun allocation
-# (local `--cores` execution, not the SLURM executor -- rule-level
-# mem_mb/runtime in the .smk files are bookkeeping only until Phase 3), so
-# its wall clock must cover the campaign, not just one rule or one tile: the
-# existing Gen-2 run of the reference tile (240.291) took ~80 min end to end,
-# ngmix alone ~54 min, and 2h was sized for that ONE-tile run. At 40 tiles
-# (1z2z_grid_1, 2026-09) a 2h cap timed out at 40/376 steps with not one
-# ngmix job finished (867554) -- there just isn't enough wall clock in the
-# one allocation for a campaign this size, regardless of the 8-core packing
-# Snakemake's local scheduler does across tiles. 47h (comp/pscomp's MaxTime
-# is 2-00:00:00, i.e. 48h) leaves margin under the cap while still fitting in
-# one submission; revisit (and think about the SLURM executor instead of
-# local `--cores`, matching shapepipe's own workflow) once the campaign grows
-# past what 47h covers.
+# COMPUTE runs the whole tile list in one --cores allocation, so its wall
+# clock covers the campaign, not one tile (~80 min/tile). 47h: just under
+# comp/pscomp's 48h MaxTime.
 declare -A CPUS=( [prepare]=2  [compute]=8 )
 declare -A MEM=(  [prepare]=8G [compute]=16G )
 declare -A TIME=( [prepare]=00:15:00 [compute]=47:00:00 )
