@@ -66,8 +66,9 @@ mkdir -p "$BATCH_DIR"
 # --- cluster / container settings, shared by both phases -------------------
 PARTITION=comp
 ACCOUNT=cusers
-# Flaky candide nodes: n17 mounts, n09 no internet, n23 hung jobs, n36.
-EXCLUDE=n09,n17,n23,n36
+# Flaky candide nodes: n17 mounts, n09 no internet, n36; n23-n25 have
+# TmpDisk=0 (a job hung on n23 with zero CPU).
+EXCLUDE=n09,n17,n23,n24,n25,n36
 BIND=/home,/scratch,/automnt,/n17data,/n23data1,/n09data
 SHAPEPIPE_SRC=/n17data/mkilbing/astro/repositories/github/shapepipe/src
 
