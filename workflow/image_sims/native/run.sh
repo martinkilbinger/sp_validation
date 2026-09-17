@@ -72,7 +72,11 @@ EXCLUDE=n09,n17,n23,n24,n25,n36
 BIND=/home,/scratch,/automnt,/n17data,/n23data1,/n09data
 SHAPEPIPE_SRC=/n17data/mkilbing/astro/repositories/github/shapepipe/src
 
-APPTAINER_ARGS="--cleanenv --bind $BIND --env PYTHONPATH=$SHAPEPIPE_SRC"
+# TMPDIR must not be /tmp: it is a small node-local disk shared by every
+# job on the node (~/CLAUDE.md). --cleanenv drops the host TMPDIR, so pass
+# it in explicitly; snakemake gets the same path via --default-resources.
+TMP_ROOT=/n23data1/mkilbing/tmp
+APPTAINER_ARGS="--cleanenv --bind $BIND,$TMP_ROOT --env PYTHONPATH=$SHAPEPIPE_SRC --env TMPDIR=$TMP_ROOT"
 
 # --- per-phase resources -----------------------------------------------------
 # COMPUTE runs the whole tile list in one --cores allocation, so its wall
@@ -115,6 +119,7 @@ export SP_PHASE=$phase
 # swapping the two fixes it. --configfile is therefore placed LAST, with
 # only EXTRA_ARGS (always dash-prefixed flags like -n) after it.
 exec snakemake --cores ${CPUS[$phase]} --sdm apptainer \\
+  --default-resources tmpdir=$TMP_ROOT \\
   --apptainer-args "$APPTAINER_ARGS" \\
   --rerun-triggers mtime params code software-env \\
   -s Snakefile --directory . \\

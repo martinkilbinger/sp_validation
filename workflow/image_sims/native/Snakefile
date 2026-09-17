@@ -81,6 +81,7 @@ against the Gen-2 reference tile.
 
 import json
 import os
+import re
 from pathlib import Path
 
 from snakemake.exceptions import WorkflowError
@@ -98,14 +99,26 @@ from snakemake.exceptions import WorkflowError
 # never needs to repeat the operational defaults.
 configfile: str(Path(workflow.snakefile).parent / "config.yaml")
 
+# $name in any config value is replaced by the top-level scalar key `name`
+# (e.g. `my_base_dir`, `sim`); scripts/run_config_sims.py is the one
+# implementation, shared with status_sims.py.
+import sys as _sys
+_sys.path.insert(0, str(Path(workflow.snakefile).parent / "scripts"))
+import run_config_sims                                      # noqa: E402
+
+try:
+    run_config_sims.expand_vars(config)
+except run_config_sims.ConfigError as _exc:
+    raise WorkflowError(f"run config: {_exc}")
+
 _REQUIRED = ("tile_list", "sim", "inputs", "outputs", "container", "psf_dict",
              "shapepipe_repo")
 _missing = [k for k in _REQUIRED if k not in config]
 if _missing:
     raise WorkflowError(
-        f"Missing required run-config key(s) {_missing} -- these have no "
-        "default in config.yaml and must be set in a run config passed via "
-        "an extra --configfile (see run.example.yaml, and run.sh -c/--config)."
+        f"Missing required run-config key(s) {_missing} -- set them in the "
+        "run config passed via run.sh -c/--config, or (for values shared by "
+        "every run here) in config.yaml."
     )
 for _k in ("tiles", "exposures"):
     if _k not in config["inputs"]:

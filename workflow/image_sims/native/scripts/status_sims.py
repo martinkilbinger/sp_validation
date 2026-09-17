@@ -6,6 +6,7 @@ a report that's part of the DAG would itself be poisoned by the failures it
 must enumerate). Run any time, mid-run or after:
 
     python scripts/status_sims.py <run_dir>
+    python scripts/status_sims.py -c my_run.yaml     # dirs from the run config
 
 For each tile/exposure and each stage, a manifest means complete, a log
 with no manifest means failed, and neither means not yet attempted -- the
@@ -109,9 +110,19 @@ def report_units(run_dir: Path, kind: str, stages: list, *, short: bool = False)
     print()
 
 
+def final_cats(products_dir: Path) -> list:
+    """The published catalogues, on the products root (which is run_dir when
+    the run config sets no products_dir)."""
+    return sorted(products_dir.glob("tiles/*/*/final_cat-*.fits"))
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("run_dir", type=Path)
+    p.add_argument("run_dir", type=Path, nargs="?",
+                   help="run directory; omit when passing -c")
+    p.add_argument("-c", "--config", type=Path,
+                   help="run config (as given to run.sh): read outputs.run_dir "
+                        "and outputs.products_dir from it, $variables expanded")
     p.add_argument("-s", "--short", action="store_true",
                    help="per-tile/per-exposure table only, no aggregate "
                         "'N units total' / per-stage count summary")
@@ -120,23 +131,38 @@ def main(argv=None) -> int:
                         "for tiles and exposures, once each (overrides -s)")
     args = p.parse_args(argv)
 
-    print(f"=== {args.run_dir} ===")
+    if args.config:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import run_config_sims
+        try:
+            run_dir, products_dir = run_config_sims.run_dirs(args.config)
+        except run_config_sims.ConfigError as exc:
+            p.error(f"{exc}")
+    elif args.run_dir:
+        run_dir = products_dir = args.run_dir
+    else:
+        p.error("give a run directory, or -c with a run config")
+
+    print(f"=== {run_dir} ===")
+    if products_dir != run_dir:
+        print(f"=== products: {products_dir} ===")
 
     if args.very_short:
-        report_finished(args.run_dir, "tiles", TILE_STAGES)
-        report_finished(args.run_dir, "exp", EXP_STAGES)
+        report_finished(run_dir, "tiles", TILE_STAGES)
+        report_finished(run_dir, "exp", EXP_STAGES)
+        print(f"final_cat produced: {len(final_cats(products_dir))}")
         return 0
 
     print()
     print("--- tiles ---")
-    report_units(args.run_dir, "tiles", TILE_STAGES, short=args.short)
+    report_units(run_dir, "tiles", TILE_STAGES, short=args.short)
     print("--- exposures ---")
-    report_units(args.run_dir, "exp", EXP_STAGES, short=args.short)
+    report_units(run_dir, "exp", EXP_STAGES, short=args.short)
 
-    final_cats = list(args.run_dir.glob("tiles/*/*/final_cat-*.fits"))
-    print(f"final_cat produced: {len(final_cats)}")
+    cats = final_cats(products_dir)
+    print(f"final_cat produced: {len(cats)}")
     if not args.short:
-        for f in final_cats:
+        for f in cats:
             print(f"  {f}")
     return 0
 
