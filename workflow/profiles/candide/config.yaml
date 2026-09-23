@@ -10,6 +10,15 @@
 # inside an ``apptainer shell``. workflow/README.md is the full story.
 
 executor: slurm
+# Concurrent SLURM jobs.  Required: snakemake refuses remote execution without
+# a job cap ("maximum number of parallel jobs ... has to be specified").
+jobs: 50
+# Concurrent ShapePipe campaigns (im_shapepipe, one per shear branch; each
+# submits its own jobs through ShapePipe's profile).  A disk bound -- see the
+# rule.  Raise it on the command line (--resources sp_campaign=5) when the run
+# dir has room for all five branches' exposure stores at once.
+resources:
+  sp_campaign: 2
 
 # --- GENERIC: mirrored in workflow/profiles/default/config.yaml -------------
 software-deployment-method: apptainer

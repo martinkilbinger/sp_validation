@@ -49,11 +49,17 @@ _OPERATIONAL_KEYS = {
     "sims_type",
     "branches",
     "shape",
-    "config_dir",
     "psf_model",
-    "n_smp",
+    "sp_profile",
+    "sp_jobs",
+    "clean_exposures",
+    "tile_store_root",
     "extract_script",
     "calibrate_script",
+}
+# Optional keys: recognized but not required; defaults applied in code below.
+_OPTIONAL_KEYS = {
+    "exp_num",
 }
 # Structural keys: paths/identifiers the run must supply (no sensible default).
 _STRUCTURAL_KEYS = {
@@ -67,7 +73,11 @@ _STRUCTURAL_KEYS = {
     "tile_ids",
 }
 _ALLOWED_KEYS = (
-    _SCIENCE_KEYS | _DEPRECATED_KEYS | _OPERATIONAL_KEYS | _STRUCTURAL_KEYS
+    _SCIENCE_KEYS
+    | _DEPRECATED_KEYS
+    | _OPERATIONAL_KEYS
+    | _OPTIONAL_KEYS
+    | _STRUCTURAL_KEYS
 )
 
 _unknown = set(IMSIM) - _ALLOWED_KEYS
@@ -118,6 +128,15 @@ SIMS_TYPE = IMSIM["sims_type"]
 _SUFFIX = f"_{SIMS_TYPE}_{NUM}" if SIMS_TYPE == "grid" else f"_{NUM}"
 SIM_BASES = list(IMSIM["branches"])
 SIMS = [f"{base}{_SUFFIX}" for base in SIM_BASES]
+# Optional ``exp_num`` pulls exposures from a different realization than tiles:
+# tiles stay on ``{branch}_{num}``, exposures come from ``{branch}_{exp_num}``.
+# Non-grid sims only (grid names embed sims_type); see config.yaml for the
+# blended use case.
+EXP_NUM = IMSIM.get("exp_num", NUM)
+if SIMS_TYPE == "grid":
+    SIM_EXP_BASE = {sim: sim for sim in SIMS}
+else:
+    SIM_EXP_BASE = {f"{base}{_SUFFIX}": f"{base}_{EXP_NUM}" for base in SIM_BASES}
 MANIFEST = f"{GRIDS_BASE}/manifest.yaml"
 BUILD_MANIFEST = f"{SPV_REPO}/workflow/scripts/im_build_manifest.py"
 
@@ -129,12 +148,26 @@ TILE_IDS = list(IMSIM["tile_ids"])
 SHAPE = IMSIM["shape"]
 MASK_CONFIG = IMSIM["mask_config"]  # e.g. config/calibration/mask_v1.X.9_im_sim.yaml
 PARAMS_TEMPLATE = f"{SPV_REPO}/workflow/image_sims/params_im_sim.py"
-# ShapePipe cfis_image_sims config dir (per-tile/exposure configs + final_cat.param).
-CONFIG_DIR = IMSIM["config_dir"]
+
+# --- ShapePipe processing: ShapePipe's own workflow ------------------------
+# ``sp`` is ShapePipe's workflow launcher; SP_CONFIG_DIR is the config chain it
+# selects for ``input_type: image_sims``.  The merge and extract steps read that
+# dir's ``final_cat.param`` (through the per-sim ``cfis`` link), so the column
+# list and the processing that wrote the columns come from one checkout.
+SP_LAUNCHER = f"{SHAPEPIPE_REPO}/workflow/bin/sp"
+SP_CONFIG_DIR = f"{SHAPEPIPE_REPO}/workflow/config/cfis_image_sims"
+PSF_MODEL = IMSIM["psf_model"]
+SP_PROFILE = IMSIM["sp_profile"]
+SP_JOBS = IMSIM["sp_jobs"]
+CLEAN_EXPOSURES = bool(IMSIM["clean_exposures"])
+# Where each tile_shape group's vignette store lives (ShapePipe's
+# ``tile_store_root``; ``sp run`` binds it to /local/scratch).  None keeps the
+# profile's node-local bind -- and keeps the key out of the run config, so
+# campaigns launched before it existed see the same params.
+TILE_STORE_ROOT = IMSIM["tile_store_root"]
 
 # ShapePipe scripts live in the ShapePipe repo (also baked into its image).
 CREATE_FINAL_CAT = f"{SHAPEPIPE_REPO}/scripts/python/create_final_cat.py"
-RUN_JOB = f"{SHAPEPIPE_REPO}/scripts/sh/run_job_sp_canfar_v2.0.bash"
 # Extract/calibrate run from the sp_validation *repo* checkout (bind-mounted),
 # not the baked copies: the container tracks the branch but lags it, and the
 # image-sims path needs branch-only fixes (star-catalogue-optional extract,
@@ -166,7 +199,45 @@ _ENV_PREFIX = (
     f"PSF_DICT={PSF_DICT} OMP_NUM_THREADS=1 "
 )
 
-JOB_MASK = sum([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048])
+
+def sp_run_config(sim):
+    """ShapePipe workflow run config for one shear branch (one ``sp`` campaign).
+
+    It REPLACES ShapePipe's committed ``workflow/config.yaml`` (``bin/sp``'s
+    ``SP_RUN_CONFIG``), so every key the campaign needs is stated; processing
+    knobs this config does not state (``ngmix_chunks``) take the ShapePipe
+    Snakefile's defaults, never a copy here.  ``clean_tiles`` stays off: the
+    merge reads each tile's make_cat output from the tile store.  ``clean``
+    (rolling exposure-store reclamation) is ``clean_exposures`` -- a 40-tile
+    branch touches ~300 exposures at ~8 GB of stores each.
+    """
+    run_dir = f"{GRIDS_BASE}/{sim}"
+    cfg = {
+        "input_type": "image_sims",
+        "psf_model": PSF_MODEL,
+        "tile_list": f"{run_dir}/tiles_{sim}.txt",
+        "inputs": {
+            "tiles": f"{INPUT_SIMS_BASE}/{sim}/images/SP_tiles",
+            "exposures": f"{INPUT_SIMS_BASE}/{SIM_EXP_BASE[sim]}/images/SP_exp",
+        },
+        "container": SIF_PIPELINE,
+        "outputs": {
+            "run_dir": run_dir,
+            "index_db": f"{run_dir}/index/run_index.sqlite",
+        },
+        "clean": CLEAN_EXPOSURES,
+        "clean_tiles": False,
+        "clean_ignore_tiles": [],
+    }
+    if PSF_MODEL == "fake":
+        cfg["psf_dict"] = PSF_DICT
+    if TILE_STORE_ROOT:
+        cfg["tile_store_root"] = TILE_STORE_ROOT
+    return cfg
+
+
+localrules:
+    im_shapepipe,
 
 
 wildcard_constraints:
@@ -187,13 +258,9 @@ rule im_init_all:
         expand(f"{GRIDS_BASE}/{{sim}}/params.py", sim=SIMS),
 
 
-rule im_pipeline_all:
+rule im_shapepipe_all:
     input:
-        expand(
-            f"{GRIDS_BASE}/{{sim}}/logs/pipeline_{{tile}}.done",
-            sim=SIMS,
-            tile=TILE_IDS,
-        ),
+        expand(f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml", sim=SIMS),
 
 
 rule im_merge_all:
@@ -252,18 +319,14 @@ rule im_manifest:
 
 
 rule im_init:
-    """Stage per-sim run directory: params.py, mask config, ShapePipe configs,
-    and the raw SKiLLS image inputs.
+    """Stage per-sim run directory: params.py, mask config, tile list, and the
+    ``cfis`` link to ShapePipe's image-sims config dir.
 
     ``params_im_sim.py`` derives the field name from the directory basename, so
     the same template serves every sim; ``config_mask.yaml`` and ``cfis`` are
     symlinks the downstream calibration and merge steps read from cwd.
-
-    ``input_tiles``/``input_exp`` are top-level symlinks to the raw SKiLLS tile
-    and exposure images; ShapePipe's ``get_images_runner`` resolves them via
-    ``$SP_DIR/input_{tiles,exp}`` (``$SP_DIR`` is the run dir). ``run_job`` does
-    not stage these, so ``im_init`` must -- this is what makes ``im_pipeline``
-    runnable from raw images, not just from pre-staged intermediates.
+    ``tiles_{sim}.txt`` is both the ShapePipe campaign's ``tile_list`` and the
+    tile-ID file ``params.py`` names for the found/missing-tile check.
     """
     input:
         # Tracked so that editing the params template or mask config re-stages
@@ -274,22 +337,20 @@ rule im_init:
     output:
         params=f"{GRIDS_BASE}/{{sim}}/params.py",
         mask=f"{GRIDS_BASE}/{{sim}}/config_mask.yaml",
+        tiles=f"{GRIDS_BASE}/{{sim}}/tiles_{{sim}}.txt",
     params:
-        config_dir=CONFIG_DIR,
-        run_dir=lambda wc: f"{GRIDS_BASE}/{wc.sim}",
+        config_dir=SP_CONFIG_DIR,
         cfis=lambda wc: f"{GRIDS_BASE}/{wc.sim}/cfis",
-        sim_tiles=lambda wc: f"{INPUT_SIMS_BASE}/{wc.sim}/images/SP_tiles",
-        sim_exp=lambda wc: f"{INPUT_SIMS_BASE}/{wc.sim}/images/SP_exp",
+        tile_ids=" ".join(TILE_IDS),
     shell:
-        # cfis / input_tiles / input_exp are stable read-only symlinks (used by
-        # get_images, merge, extract); created here but not tracked as outputs,
-        # which snakemake will not accept for a symlink/directory.
+        # cfis is a stable read-only symlink (used by merge and extract);
+        # created here but not tracked as an output, which snakemake will not
+        # accept for a symlink to a directory.
         "mkdir -p $(dirname {output.params}) && "
         "cp {input.template} {output.params} && "
         "ln -sf {input.mask_src} {output.mask} && "
         "ln -sfT {params.config_dir} {params.cfis} && "
-        "ln -sfT {params.sim_tiles} {params.run_dir}/input_tiles && "
-        "ln -sfT {params.sim_exp} {params.run_dir}/input_exp"
+        "printf '%s\\n' {params.tile_ids} > {output.tiles}"
 
 
 rule im_pipeline:
@@ -306,11 +367,9 @@ rule im_pipeline:
         # produces and aborts on a fresh grids_base.
         params=f"{GRIDS_BASE}/{{sim}}/params.py",
     output:
-        done=touch(f"{GRIDS_BASE}/{{sim}}/logs/pipeline_{{tile}}.done"),
-    params:
-        run_dir=lambda wc: f"{GRIDS_BASE}/{wc.sim}",
-        psf=IMSIM["psf_model"],
-        n_smp=IMSIM["n_smp"],
+        record=f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml",
+    log:
+        f"{GRIDS_BASE}/{{sim}}/logs/sp_run.log",
     resources:
         mem_mb=16000,
         runtime=720,
@@ -327,13 +386,12 @@ rule im_merge:
     """Merge per-tile ShapePipe catalogues into final_cat_{sim}.hdf5.
 
     ``create_final_cat.py`` lives in the ShapePipe repo/image; run in image_sims
-    mode (``-I``) it walks the per-tile output under the run directory.
+    mode (``-I``) it walks the campaign's tile stores under the run directory
+    (``tiles/<shard>/<tile>/output/run_sp_tile_Mc``), selecting the columns in
+    ShapePipe's image-sims ``final_cat.param``.
     """
     input:
-        tiles=expand(
-            f"{GRIDS_BASE}/{{{{sim}}}}/logs/pipeline_{{tile}}.done",
-            tile=TILE_IDS,
-        ),
+        record=f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml",
     output:
         cat=f"{GRIDS_BASE}/{{sim}}/final_cat_{{sim}}.hdf5",
     params:
@@ -397,11 +455,16 @@ rule im_mbias_config:
         cats=expand(
             f"{GRIDS_BASE}/{{sim}}/shape_catalog_cut_{SHAPE}.fits", sim=SIMS
         ),
+        # The per-branch ShapePipe campaign records, for provenance.
+        campaigns=expand(
+            f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml", sim=SIMS
+        ),
     output:
         cfg=f"{GRIDS_BASE}/results/m_bias_config.yaml",
     params:
         grids_base=GRIDS_BASE,
         num=NUM,
+        sims_type=SIMS_TYPE,
         cat_name=f"shape_catalog_cut_{SHAPE}.fits",
         sif=SIF,
         shapepipe_repo=SHAPEPIPE_REPO,
