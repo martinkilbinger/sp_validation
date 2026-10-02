@@ -330,8 +330,11 @@ rule im_init:
     ``cfis`` link to ShapePipe's image-sims config dir.
 
     ``params_im_sim.py`` derives the field name from the directory basename, so
-    the same template serves every sim; ``config_mask.yaml`` and ``cfis`` are
-    symlinks the downstream calibration and merge steps read from cwd.
+    the same template serves every sim; ``config_mask.yaml`` (a copy) and
+    ``cfis`` (a symlink) are what the downstream calibration and merge steps
+    read from cwd. The mask config is copied, not linked: a link into the
+    sp_validation checkout or spv's code snapshot breaks when that is removed
+    or refreshed, and the run dir should keep the mask it was calibrated with.
     ``tiles_{sim}.txt`` is both the ShapePipe campaign's ``tile_list`` and the
     tile-ID file ``params.py`` names for the found/missing-tile check.
     """
@@ -355,7 +358,7 @@ rule im_init:
         # accept for a symlink to a directory.
         "mkdir -p $(dirname {output.params}) && "
         "cp {input.template} {output.params} && "
-        "ln -sf {input.mask_src} {output.mask} && "
+        "rm -f {output.mask} && cp {input.mask_src} {output.mask} && "
         "ln -sfT {params.config_dir} {params.cfis} && "
         "printf '%s\\n' {params.tile_ids} > {output.tiles}"
 
