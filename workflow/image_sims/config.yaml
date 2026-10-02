@@ -1,49 +1,29 @@
-# Image-simulation m-bias workflow configuration.
-#
-# OPERATIONAL keys default here and nowhere else -- the .smk reads them bare, so
-# this file is their single home. SCIENCE keys have no default anywhere and
-# appear below only as commented template lines: they fix the estimator's
-# behaviour, so each run must state them in a run config layered on top. A run
-# config that omits one fails at DAG parse, naming the key; an unknown key under
-# `image_sims:` fails as a typo.
+# Config file for sp_validation post-processing of image simulations.
+# Inputs: final catalogues for 4 sheared versions.
+# Output: Multiplicative bias estimation.
 
 image_sims:
 
-  # --- container --------------------------------------------------------
-  # One image for the whole chain: the sp_validation image is built FROM the
-  # ShapePipe image, so it carries both stacks. CI builds it from the uv lock --
-  # an unlocked build drifts NumPy past numba's ceiling and the ngmix stage dies
-  # ("Numba needs NumPy 2.4 or less").
-  #
-  # `null` means the workflow's one image: your own .sif if you have pulled one
-  # with `spv-container pull`, else the registry tag for Snakemake to autopull
-  # (workflow/README.md).  Neither is repeated here.
-  # Override with a local .sif path, or with a branch tag
-  # (docker://ghcr.io/cosmostat/sp_validation:<sanitized-branch>) to run a
-  # branch's own CI image.
-  sif: null
-
-  # --- repositories -----------------------------------------------------
+  # --- repositories (REQUIRED in the run config; no default) -------------
   # Bound into the image; both repos' src go on PYTHONPATH so this branch's
-  # code wins over the baked copies.
-  shapepipe_repo: /n17data/cdaley/unions/code/shapepipe
-  sp_validation_repo: /n17data/cdaley/unions/code/sp_validation
+  # code wins over the baked copies. Per-user checkouts, so there is nothing
+  # sensible to default to -- a default here would silently run someone else's
+  # code. A run config that omits one fails at parse, naming it.
+  #
+  # shapepipe_repo: /path/to/shapepipe
+  # sp_validation_repo: /path/to/sp_validation
 
   # --- data and run directories ----------------------------------------
-  # grids_base is the run/output root: one sub-directory per simulation.
-  grids_base: /n17data/cdaley/unions/scratch-wf/imsims-run/grids
+  # grids_base is the run/output root (one sub-directory per simulation), and
+  # is REQUIRED in the run config -- it is where this user's campaign writes.
+  #
+  # grids_base: /path/to/grids
   input_sims_base: /n09data/hervas/skills_out
   psf_dict: /home/hervas/fhervas/workdir_skills/input/psf_files/Full_psf_dict.pickle
 
   # --- simulation grid --------------------------------------------------
   sims_type: grid        # 'grid' -> *_grid_{num}; anything else -> *_{num}  [operational]
   num: 1
-  # Optional: pull exposures from a different realization than tiles (tiles
-  # from `{branch}_{num}`, exposures from `{branch}_{exp_num}`; unset ->
-  # exposures follow `num`).  Non-grid sims only.  Fabian's blended production
-  # split: tiles from _1, exposures from _5 (the clean all-real exposure set;
-  # _1.._4 carry signal-free grid-sims SP_exp cross-links).
-  # exp_num: 5
   # Branches this run requests: the unsheared reference plus the four +/-
   # sheared branches.  Injected shear is NOT set here -- it is parsed from each
   # branch's basic_info.txt by im_manifest.  [operational]
@@ -86,11 +66,13 @@ image_sims:
   # every later tile group on that node.  Set a shared directory for the star
   # sims (all branches and runs can share one root).  [operational]
   tile_store_root: null
-  # Extract/calibrate scripts run from the sp_validation repo checkout (branch
-  # code, not the baked copies).  Point elsewhere for a different checkout.
-  # [operational]
-  extract_script: /n17data/cdaley/unions/code/sp_validation/scripts/calibration/extract_info.py
-  calibrate_script: /n17data/cdaley/unions/code/sp_validation/scripts/calibration/calibrate_comprehensive_cat.py
+  # Extract/calibrate scripts default to the sp_validation_repo checkout above
+  # (as compute_m_bias_image_sims.py already did), so branch code runs rather
+  # than the copies baked into the image. Set one only to point at a DIFFERENT
+  # checkout.
+  #
+  # extract_script: /other/checkout/scripts/calibration/extract_info.py
+  # calibrate_script: /other/checkout/scripts/calibration/calibrate_comprehensive_cat.py
 
   # --- science knobs (REQUIRED in the run config; no default) -----------
   # Copy these into your run config and set them.  There is deliberately no

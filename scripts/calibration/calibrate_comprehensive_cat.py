@@ -215,6 +215,23 @@ add_cols_data["e1_leak_corrected"] = e1_leak_corrected
 add_cols_data["e2_leak_corrected"] = e2_leak_corrected
 
 # %%
+# Tile IDs and leave-one-tile-out response, for a jackknife over tiles
+# downstream (image-sims m-bias): each jackknife sample is recalibrated with
+# its own R = R_shear + R_selection, and its own R_joint
+add_cols_format = {}
+tile_ids_jk = None
+if "TILE_ID" in dat.dtype.names:
+    tile_col = np.asarray(dat["TILE_ID"]).astype(str)
+    add_cols_data["TILE_ID"] = tile_col[mask_combined._mask][mask_metacal]
+    add_cols_format["TILE_ID"] = f"{max(len(t) for t in tile_col)}A"
+    tile_ids_jk, R_jk, R_joint_jk = gal_metacal.response_jackknife(
+        tile_col[mask_combined._mask]
+    )
+    print(f"Leave-one-tile-out response computed for {len(tile_ids_jk)} tiles")
+else:
+    print("No TILE_ID column, skipping leave-one-tile-out response")
+
+# %%
 # Add information to FITS header
 
 # Generate new header
@@ -222,6 +239,32 @@ header = fits.Header()
 
 # Add general and metacal config information to FITS header
 obj.add_params_to_FITS_header(header, cm=cm)
+
+# %%
+# Joint shear and selection response, alternative to R (image-sims m-bias)
+for _i in (1, 2):
+    for _j in (1, 2):
+        header[f"RJ_{_i}{_j}"] = (
+            float(gal_metacal.R_joint[_i - 1][_j - 1]),
+            f"Joint shear+selection response comp {_i} {_j}",
+        )
+print(f"Joint response R_joint =\n{gal_metacal.R_joint}\nR =\n{gal_metacal.R}")
+
+# %%
+# Resampling error on the selection response. R_selection divides a tiny
+# difference of means by 2h = 0.02, so it is noise-amplifying by construction;
+# without this number an R_S of a few percent cannot be told from zero.
+for _i in (1, 2):
+    for _j in (1, 2):
+        header[f"R_S{_i}{_j}_E"] = (
+            float(gal_metacal.R_selection_std[_i - 1][_j - 1]),
+            f"Resampling std of selection response R_S{_i}{_j}",
+        )
+print(
+    "Selection response R_S11 = "
+    f"{gal_metacal.R_selection[0][0]:+.4f} +- {gal_metacal.R_selection_std[0][0]:.4f}, "
+    f"R_S22 = {gal_metacal.R_selection[1][1]:+.4f} +- {gal_metacal.R_selection_std[1][1]:.4f}"
+)
 
 # %%
 # Add mask information to FITS header
@@ -249,8 +292,33 @@ cat.write_shape_catalog(
     c_err=c_err,
     w_type="des",
     add_cols=add_cols_data,
+    add_cols_format=add_cols_format,
     add_header=header,
 )
+
+# %%
+# Leave-one-tile-out response as extra HDU "R_JK"
+if tile_ids_jk is not None:
+    jk_cols = [
+        fits.Column(
+            name="TILE_ID", array=tile_ids_jk, format=add_cols_format["TILE_ID"]
+        )
+    ]
+    for key, resp in (("R", R_jk), ("RJ", R_joint_jk)):
+        for _i in (1, 2):
+            for _j in (1, 2):
+                jk_cols.append(
+                    fits.Column(
+                        name=f"{key}_{_i}{_j}",
+                        array=resp[:, _i - 1, _j - 1],
+                        format="D",
+                    )
+                )
+    jk_hdu = fits.BinTableHDU.from_columns(jk_cols, name="R_JK")
+    jk_hdu.header["COMMENT"] = "Responses with tile TILE_ID left out:"
+    jk_hdu.header["COMMENT"] = "R_ij = R_shear + R_select, RJ_ij = joint response"
+    with fits.open(output_shape_cat_path, mode="append") as hdul:
+        hdul.append(jk_hdu)
 
 # %%
 # Write mask information to ASCII file

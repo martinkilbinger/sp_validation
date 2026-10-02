@@ -275,17 +275,25 @@ def main():
     # scalars serialise as !!python/object binary).
     results = to_python(mb.run(verbose=True))
 
+    # Response methods: R = R_shear + R_select, and R_joint if available
+    methods = {"R_shear + R_select": results["weights"]}
+    if "joint" in results:
+        methods["joint"] = results["joint"]["weights"]
+
     print()
     print("=" * 40)
     print("  Results")
     print("=" * 40)
-    for scheme, res in results["weights"].items():
-        print(f"  weights: {scheme}")
-        print(f"    m1 = {res['m1']:+.4f} +-{res['m1_err']:.4f}")
-        print(f"    c1 = {res['c1']:+.4f} +-{res['c1_err']:.4f}")
-        print(f"    m2 = {res['m2']:+.4f} +-{res['m2_err']:.4f}")
-        print(f"    c2 = {res['c2']:+.4f} +-{res['c2_err']:.4f}")
-    print("=" * 40)
+    for method, weights in methods.items():
+        print(f"  response: {method}")
+        for scheme, res in weights.items():
+            print(f"  weights: {scheme}")
+            for key in ("m1", "c1", "m2", "c2"):
+                line = f"    {key} = {res[key]:+.4f} +-{res[key + '_err']:.4f}"
+                if key + "_err_jk" in res:
+                    line += f" (tile jackknife +-{res[key + '_err_jk']:.4f})"
+                print(line)
+        print("=" * 40)
 
     # Cumulative tracking
     if args.cumulative:
@@ -326,16 +334,29 @@ def main():
     with open(txt_path, "w") as f:
         f.write("Multiplicative and additive shear bias from image simulations\n")
         f.write("=" * 60 + "\n")
-        for scheme, res in results["weights"].items():
-            f.write(f"\nweights: {scheme}\n")
-            f.write(f"  m1 = {res['m1']:+.6f} ± {res['m1_err']:.6f}\n")
-            f.write(f"  c1 = {res['c1']:+.6f} ± {res['c1_err']:.6f}\n")
-            f.write(f"  m2 = {res['m2']:+.6f} ± {res['m2_err']:.6f}\n")
-            f.write(f"  c2 = {res['c2']:+.6f} ± {res['c2_err']:.6f}\n")
+        for method, weights in methods.items():
+            f.write(f"\nresponse: {method}\n")
+            for scheme, res in weights.items():
+                f.write(f"\nweights: {scheme}\n")
+                for key in ("m1", "c1", "m2", "c2"):
+                    line = f"  {key} = {res[key]:+.6f} ± {res[key + '_err']:.6f}"
+                    if key + "_err_jk" in res:
+                        line += f"  (tile jackknife ± {res[key + '_err_jk']:.6f})"
+                    f.write(line + "\n")
         f.write(
             "\nErrors computed via bootstrap resampling "
             f"(n={config['n_bootstrap']} resamples)\n"
         )
+        if any("m1_err_jk" in res for res in results["weights"].values()):
+            f.write(
+                "Tile jackknife: leave one tile out, recalibrated with the"
+                " response computed without that tile\n"
+            )
+        if "joint" in methods:
+            f.write(
+                "Response joint: R_ij = (<g_i> over sel_jp - <g_i> over sel_jm)"
+                " / 2h, g and selection from the same sheared branch\n"
+            )
     print(f"Results written to {txt_path}")
 
     if args.cumulative:

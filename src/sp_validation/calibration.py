@@ -903,7 +903,9 @@ class metacal:
 
         self._shear_response()
         self._selection_response()
+        self._selection_response_std()
         self._total_response()
+        self._joint_response()
         # self._shear_response_std(stat_operator=lambda x:
         # jackknif_weighted_average(x, np.ones_like(x)))
 
@@ -1068,11 +1070,42 @@ class metacal:
                 [[self.R11_stds, self.R12_stds], [self.R21_stds, self.R22_stds]]
             )
 
+    def _mean_ns(self, comp, mask, data=None):
+        """Mean of a component over ``mask``, weighted like the total.
+
+        The component is taken from the noshear branch, or from ``data`` (a
+        sheared branch) if given. Weighted with ``global_R_weight`` when it is
+        set, unweighted otherwise -- the same switch ``_total_response``
+        applies to the shear term. The weights are always the noshear ones.
+        """
+        values = (self.ns if data is None else data)[comp][mask]
+        if self._global_R_weight is None or self._global_R_weight == "None":
+            return np.mean(values)
+        return np.average(values, weights=self.ns[self._global_R_weight][mask])
+
     def _selection_response(self):
-        """Add docstring.
+        """Response of the SELECTION, as a difference of two sample means.
 
-        ...
+        Unlike the shear response there is no per-object value here: the two
+        means are taken over DIFFERENT subsets -- the noshear ellipticities
+        selected by the +/- sheared catalogues' own masks -- so this quantity
+        exists only at ensemble level and cannot be binned, nor averaged over
+        objects.
 
+        It can still carry weights, and must. The estimator divides a weighted
+        mean ellipticity by R = R_shear + R_selection, so both terms have to be
+        the response OF THAT WEIGHTED MEAN. For the shear term that means a
+        weighted mean of per-object responses; for this one it means weighted
+        means INSIDE the difference. Leaving it unweighted while the shear term
+        is weighted leaves R inconsistent with the average it calibrates, at
+        the few-percent level R_selection/R reaches in practice.
+
+        NOT included: the response of the WEIGHTS themselves. ``w_des`` is a
+        function of snr and size_ratio, both of which shift under metacal
+        shear, so a complete treatment recomputes the weights on each sheared
+        counterpart and folds that term in here (Gatti et al. 2021). That needs
+        weights available per sheared catalogue, which they are not -- w_des is
+        derived from the response, after calibration.
         """
         ma_p1 = self.mask_dict["p1"]
         ma_m1 = self.mask_dict["m1"]
@@ -1080,22 +1113,189 @@ class metacal:
         ma_m2 = self.mask_dict["m2"]
         h2 = 2 * self._step
 
-        self.R11_s = (
-            np.mean(self.ns["g1"][ma_p1]) - np.mean(self.ns["g1"][ma_m1])
-        ) / h2
-        self.R22_s = (
-            np.mean(self.ns["g2"][ma_p2]) - np.mean(self.ns["g2"][ma_m2])
-        ) / h2
-        self.R12_s = (
-            np.mean(self.ns["g1"][ma_p2]) - np.mean(self.ns["g1"][ma_m2])
-        ) / h2
-        self.R21_s = (
-            np.mean(self.ns["g2"][ma_p1]) - np.mean(self.ns["g2"][ma_m1])
-        ) / h2
+        self.R11_s = (self._mean_ns("g1", ma_p1) - self._mean_ns("g1", ma_m1)) / h2
+        self.R22_s = (self._mean_ns("g2", ma_p2) - self._mean_ns("g2", ma_m2)) / h2
+        self.R12_s = (self._mean_ns("g1", ma_p2) - self._mean_ns("g1", ma_m2)) / h2
+        self.R21_s = (self._mean_ns("g2", ma_p1) - self._mean_ns("g2", ma_m1)) / h2
 
         self.R_selection = np.array(
             [[self.R11_s, self.R12_s], [self.R21_s, self.R22_s]]
         )
+
+    def _response_from_selections(self, sel, joint=False):
+        """Response as a difference of means over the sheared selections.
+
+        R_ij = (<g_i> over sel_jp - <g_i> over sel_jm) / 2h. With
+        ``joint=False`` g is the noshear ellipticity, which gives the
+        selection response R_selection. With ``joint=True`` g is measured on
+        the sheared branch itself, which gives shear and selection response
+        in one go, R_joint ~ R_shear + R_selection (metadetection, Sheldon et
+        al. 2020).
+
+        Parameters
+        ----------
+        sel : dict
+            index arrays for the keys "p1", "m1", "p2", "m2"
+        joint : bool, optional
+            see above; default is ``False``
+
+        Returns
+        -------
+        numpy.ndarray
+            2x2 response matrix
+        """
+        branch = {"p1": self.p1, "m1": self.m1, "p2": self.p2, "m2": self.m2}
+        h2 = 2 * self._step
+        return np.array(
+            [
+                [
+                    (
+                        self._mean_ns(comp, sel[plus], branch[plus] if joint else None)
+                        - self._mean_ns(
+                            comp, sel[minus], branch[minus] if joint else None
+                        )
+                    )
+                    / h2
+                    for plus, minus in (("p1", "m1"), ("p2", "m2"))
+                ]
+                for comp in ("g1", "g2")
+            ]
+        )
+
+    def _joint_response(self):
+        """Shear and selection response in one go, see
+        ``_response_from_selections``. Alternative to R."""
+        self.R_joint = self._response_from_selections(self.mask_dict, joint=True)
+
+    def _selection_response_std(self, n_realization=100, remove_size=0.1, seed=42):
+        """Resampling error on ``R_selection``.
+
+        Why this needs its own estimator, rather than the one the shear term
+        uses: R_selection is a DIFFERENCE OF TWO MEANS over different subsets
+        of the same objects, and those subsets overlap almost entirely -- they
+        differ only in objects near the selection boundary. Resampling the two
+        independently would treat them as unrelated samples and inflate the
+        error by orders of magnitude. So OBJECTS are resampled once per
+        realization and both masked means are recomputed from the same draw,
+        which preserves their correlation, and the four components share a draw
+        so their errors are mutually consistent too.
+
+        Why it matters at all: R_selection = Delta<e> / 2h with h = 0.01, so it
+        divides a tiny difference of means by 0.02 -- a 50x amplification of
+        whatever noise is in <e>. An R_selection of 0.02 corresponds to a
+        difference of only 4e-4 in mean ellipticity. Its scatter therefore has
+        to be measured before any m-bias difference is attributed to it.
+
+        Seeded by default: this is a diagnostic that gets compared between
+        runs, so it must not change when nothing else did.
+        """
+        rng = np.random.default_rng(seed)
+        n_obj = len(self.ns["g1"])
+
+        # mask_dict holds INTEGER INDEX arrays (_masking_gal stores
+        # np.where(...)[0]), which index the full catalogue directly. Resampling
+        # needs the opposite question -- "is object i selected?" -- so convert
+        # once to boolean membership over all n_obj. Accepts a boolean mask too,
+        # in case a masking variant ever stores one.
+        def as_membership(m):
+            m = np.asarray(m)
+            if m.dtype == bool and m.shape[0] == n_obj:
+                return m
+            out = np.zeros(n_obj, dtype=bool)
+            out[m] = True
+            return out
+
+        masks = {k: as_membership(self.mask_dict[k]) for k in ("p1", "m1", "p2", "m2")}
+        keep = int(n_obj * (1 - remove_size))
+        if keep < 2:
+            self.R_selection_std = np.full((2, 2), np.nan)
+            return
+
+        weighted = not (
+            self._global_R_weight is None or self._global_R_weight == "None"
+        )
+        h2 = 2 * self._step
+
+        def mean_at(comp, mask, idx):
+            sel = idx[mask[idx]]
+            if len(sel) == 0:
+                return np.nan
+            values = self.ns[comp][sel]
+            if weighted:
+                return np.average(values, weights=self.ns[self._global_R_weight][sel])
+            return np.mean(values)
+
+        est = []
+        for _ in range(n_realization):
+            idx = rng.choice(n_obj, keep, replace=True)
+            est.append([
+                (mean_at("g1", masks["p1"], idx) - mean_at("g1", masks["m1"], idx)) / h2,
+                (mean_at("g1", masks["p2"], idx) - mean_at("g1", masks["m2"], idx)) / h2,
+                (mean_at("g2", masks["p1"], idx) - mean_at("g2", masks["m1"], idx)) / h2,
+                (mean_at("g2", masks["p2"], idx) - mean_at("g2", masks["m2"], idx)) / h2,
+            ])
+        s = np.nanstd(np.array(est), axis=0)
+        self.R_selection_std = np.array([[s[0], s[1]], [s[2], s[3]]])
+
+    def response_jackknife(self, groups):
+        """Full responses R and R_joint with one group left out.
+
+        Recomputes R = R_shear + R_selection and R_joint, with the same
+        estimators and weighting as the full-sample ones, once per group
+        label, dropping that group's objects from every metacal branch. Used
+        for a leave-one-tile-out jackknife: the m-bias step recalibrates each
+        jackknife sample with its own response, so the noise in the response
+        reaches the error on m.
+
+        Parameters
+        ----------
+        groups : array-like
+            group label (e.g. tile ID) per object of the metacal input, that
+            is, aligned with ``data[mask]`` as passed to the constructor
+
+        Returns
+        -------
+        labels : numpy.ndarray
+            sorted unique group labels
+        R_jk : numpy.ndarray
+            full response with that group left out, shape (n_labels, 2, 2)
+        R_joint_jk : numpy.ndarray
+            joint response with that group left out, shape (n_labels, 2, 2)
+        """
+        groups = np.asarray(groups)
+        if len(groups) != len(self.ns["g1"]):
+            raise ValueError(
+                f"groups has {len(groups)} entries, metacal input has"
+                + f" {len(self.ns['g1'])}"
+            )
+        labels = np.unique(groups)
+
+        if self._global_R_weight is None or self._global_R_weight == "None":
+            weight = np.ones(len(groups))
+        else:
+            weight = self.ns[self._global_R_weight]
+
+        # Shear response: per-object values on the noshear selection
+        ma = self.mask_dict["ns"]
+        R_obj = self.R_shear
+        grp_ns = groups[ma]
+        w_ns = weight[ma]
+
+        R_jk = np.empty((len(labels), 2, 2))
+        R_joint_jk = np.empty((len(labels), 2, 2))
+        for idx, label in enumerate(labels):
+            keep = grp_ns != label
+            R_shear = np.average(R_obj[:, :, keep], axis=2, weights=w_ns[keep])
+
+            # Sheared selections without this group
+            sel = {
+                key: self.mask_dict[key][groups[self.mask_dict[key]] != label]
+                for key in ("p1", "m1", "p2", "m2")
+            }
+            R_jk[idx] = R_shear + self._response_from_selections(sel)
+            R_joint_jk[idx] = self._response_from_selections(sel, joint=True)
+
+        return labels, R_jk, R_joint_jk
 
     def _total_response(self):
         """Add docstring.

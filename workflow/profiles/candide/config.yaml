@@ -57,7 +57,7 @@ default-resources:
   slurm_partition: "comp,pscomp"
   runtime: "60m"
   cpus_per_task: 12
-  slurm_extra: "'--exclude=n17,n36'"
+  slurm_extra: "'--exclude=n17,n35,n36'"
 
 # Snakemake refuses a real run on a remote executor without a job bound.
 jobs: 100

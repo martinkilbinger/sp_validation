@@ -54,16 +54,24 @@ _OPERATIONAL_KEYS = {
     "sp_jobs",
     "clean_exposures",
     "tile_store_root",
-    "extract_script",
-    "calibrate_script",
 }
 # Optional keys: recognized but not required; defaults applied in code below.
 _OPTIONAL_KEYS = {
-    "exp_num",
+    # Overrides only: each has a working default derived below from
+    # sp_validation_repo, so pointing at a different checkout is opt-in and a
+    # missing key cannot silently select someone else's code.
+    "extract_script",
+    "calibrate_script",
+    # The container image. Optional because it has a working default chain
+    # (sp_validation.container.resolve_image: local sandbox, then local sif,
+    # then the registry tag), unlike the structural keys below, which have no
+    # sensible default at all. On candide it comes from the profile, whose
+    # `config:` sets the cluster's image -- a machine-specific path belongs
+    # with the machine, not in this shared file.
+    "sif",
 }
 # Structural keys: paths/identifiers the run must supply (no sensible default).
 _STRUCTURAL_KEYS = {
-    "sif",
     "shapepipe_repo",
     "sp_validation_repo",
     "grids_base",
@@ -107,7 +115,7 @@ if _missing_structural:
 # workflow/Snakefile, whose module default is the cosmology image (no ShapePipe
 # stack).  Binds come from the driving profile's ``apptainer-args``.  A null
 # ``sif`` resolves to the workflow's one image (see workflow/image_sims/config.yaml).
-SIF = common.resolve_container(IMSIM["sif"])
+SIF = common.resolve_container(IMSIM.get("sif"))
 
 # --- repositories (bound into the image; branch code overrides) -----------
 SHAPEPIPE_REPO = IMSIM["shapepipe_repo"]
@@ -167,13 +175,17 @@ CLEAN_EXPOSURES = bool(IMSIM["clean_exposures"])
 TILE_STORE_ROOT = IMSIM["tile_store_root"]
 
 # ShapePipe scripts live in the ShapePipe repo (also baked into its image).
-CREATE_FINAL_CAT = f"{SHAPEPIPE_REPO}/scripts/python/create_final_cat.py"
 # Extract/calibrate run from the sp_validation *repo* checkout (bind-mounted),
 # not the baked copies: the container tracks the branch but lags it, and the
 # image-sims path needs branch-only fixes (star-catalogue-optional extract,
 # FITS-aware CalibrateCat.read_cat). Overridable for a different checkout.
-EXTRACT_INFO = IMSIM["extract_script"]
-CALIBRATE = IMSIM["calibrate_script"]
+EXTRACT_INFO = IMSIM.get(
+    "extract_script", f"{SPV_REPO}/scripts/calibration/extract_info.py"
+)
+CALIBRATE = IMSIM.get(
+    "calibrate_script",
+    f"{SPV_REPO}/scripts/calibration/calibrate_comprehensive_cat.py",
+)
 # m-bias is *this branch's* extracted core, injected on PYTHONPATH.
 COMPUTE_M_BIAS = f"{SPV_REPO}/scripts/compute_m_bias_image_sims.py"
 
@@ -184,8 +196,8 @@ COMPUTE_M_BIAS = f"{SPV_REPO}/scripts/compute_m_bias_image_sims.py"
 #   * PYTHONPATH prepends both repos' ``src`` so Python resolves the worktree
 #     build ahead of the copies baked into the image -- the branch's code runs
 #     without an image rebuild. Packages only: the bash and python entry points
-#     are invoked at the repo paths from config (RUN_JOB, CREATE_FINAL_CAT,
-#     EXTRACT_INFO, ...), not shadowed by PYTHONPATH.
+#     are invoked at the repo paths from config (EXTRACT_INFO,
+#     CALIBRATE, ...), not shadowed by PYTHONPATH.
 #   * PSF_DICT points the fake_psf module (PSF_DICT_PATH = $PSF_DICT, expanded
 #     via getexpanded) at this run's PSF dictionary.
 #   * OMP_NUM_THREADS=1 rides here rather than in the SLURM profile: the chain
@@ -237,7 +249,7 @@ def sp_run_config(sim):
 
 
 localrules:
-    im_shapepipe,
+    im_pipeline,
 
 
 wildcard_constraints:
@@ -261,11 +273,6 @@ rule im_init_all:
 rule im_shapepipe_all:
     input:
         expand(f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml", sim=SIMS),
-
-
-rule im_merge_all:
-    input:
-        expand(f"{GRIDS_BASE}/{{sim}}/final_cat_{{sim}}.hdf5", sim=SIMS),
 
 
 rule im_extract_all:
@@ -381,29 +388,25 @@ rule im_pipeline:
         "-e {wildcards.tile} -t image_sims -j {JOB_MASK} "
         "-p {params.psf} -N {params.n_smp}"
 
+def merged_cat(wc):
+    """This sim's merged catalogue.
 
-rule im_merge:
-    """Merge per-tile ShapePipe catalogues into final_cat_{sim}.hdf5.
+    ShapePipe's own workflow (``merge_final_cats``, shapepipe #891) publishes it
+    under ``product/`` with the rest of the campaign's products, and that is the
+    only copy surviving ``clean_tile``. This workflow no longer merges -- the
+    ``im_merge`` rule that wrote one at the branch root was dropped once the
+    ShapePipe side gained the step.
 
-    ``create_final_cat.py`` lives in the ShapePipe repo/image; run in image_sims
-    mode (``-I``) it walks the campaign's tile stores under the run directory
-    (``tiles/<shard>/<tile>/output/run_sp_tile_Mc``), selecting the columns in
-    ShapePipe's image-sims ``final_cat.param``.
+    The branch-root fallback is kept for a catalogue merged by hand or by an
+    older campaign. NOTHING PRODUCES IT any more, so a sim with neither copy
+    fails at DAG build on a missing input instead of silently re-merging --
+    the honest outcome, since the campaign that should have published it did
+    not.
     """
-    input:
-        record=f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml",
-    output:
-        cat=f"{GRIDS_BASE}/{{sim}}/final_cat_{{sim}}.hdf5",
-    params:
-        run_dir=lambda wc: f"{GRIDS_BASE}/{wc.sim}",
-    container:
-        SIF
-    shell:
-        "cd {params.run_dir} && "
-        "{_ENV_PREFIX} python {CREATE_FINAL_CAT} "
-        "-I -m final_cat_{wildcards.sim}.hdf5 -i .. "
-        "-p cfis/final_cat.param -P {wildcards.sim} "
-        "-o n_tiles_final.txt -v"
+    prod = f"{GRIDS_BASE}/{wc.sim}/product/final_cat_{wc.sim}.hdf5"
+    if os.path.exists(prod):
+        return prod
+    return f"{GRIDS_BASE}/{wc.sim}/final_cat_{wc.sim}.hdf5"
 
 
 rule im_extract:
@@ -411,17 +414,30 @@ rule im_extract:
 
     ``extract_info.py`` reads ``params.py`` from cwd and the merged catalogue,
     writing ``shape_catalog_comprehensive_{shape}``.
+
+    Stages the catalogue itself rather than assuming a producer left it in the
+    right place: ``params_im_sim.py`` sets ``data_dir = "."`` and names
+    ``final_cat_{name}.hdf5`` with ``name`` from the directory basename, so the
+    file has to be reachable from the branch dir under exactly that name. A
+    catalogue published under ``product/`` is linked in; one already at the
+    root is left alone.
     """
     input:
-        cat=f"{GRIDS_BASE}/{{sim}}/final_cat_{{sim}}.hdf5",
+        cat=merged_cat,
         params=f"{GRIDS_BASE}/{{sim}}/params.py",
     output:
         cat=f"{GRIDS_BASE}/{{sim}}/shape_catalog_comprehensive_{SHAPE}.fits",
     params:
         run_dir=lambda wc: f"{GRIDS_BASE}/{wc.sim}",
+        staged=lambda wc: f"{GRIDS_BASE}/{wc.sim}/final_cat_{wc.sim}.hdf5",
     container:
         SIF
     shell:
+        # Compare resolved paths: when the catalogue is already at the branch
+        # root, source and destination are the same file and `ln -sf` would
+        # replace it with a link to itself.
+        '[ "$(readlink -f {input.cat})" = "$(readlink -f {params.staged})" ] '
+        "|| ln -sf {input.cat} {params.staged}; "
         "cd {params.run_dir} && {_ENV_PREFIX} python {EXTRACT_INFO}"
 
 
@@ -446,6 +462,33 @@ rule im_calibrate:
         "{_ENV_PREFIX} python {CALIBRATE} -s calibrate"
 
 
+def campaign_records():
+    """Per-branch evidence that the ShapePipe campaign finished, for ordering.
+
+    WHICH file that is depends on which workflow ran the campaign, and both
+    shapes are in use: ShapePipe's unified workflow publishes
+    product/index/run_report.json, while the older sp_validation-driven runs
+    left n_tiles_final.txt beside the merged catalogue at the branch root.
+    Pick whichever exists, so a grid processed years apart still gets an edge.
+
+    Nothing READS these -- im_mbias_config.py takes no input.* -- so the path
+    only has to name a file that really exists for that branch. A branch with
+    none contributes nothing rather than blocking the DAG on a file no rule
+    produces; its merged catalogue is already a declared input elsewhere.
+    """
+    found = []
+    for sim in SIMS:
+        for cand in (
+            f"{GRIDS_BASE}/{sim}/product/index/run_report.json",
+            f"{GRIDS_BASE}/{sim}/product/n_tiles_final.txt",
+            f"{GRIDS_BASE}/{sim}/n_tiles_final.txt",
+        ):
+            if os.path.exists(cand):
+                found.append(cand)
+                break
+    return found
+
+
 rule im_mbias_config:
     """Assemble ``m_bias_config.yaml`` for the m-bias step: the manifest's
     shear/branch facts, this run's science knobs, and git/container provenance.
@@ -455,10 +498,14 @@ rule im_mbias_config:
         cats=expand(
             f"{GRIDS_BASE}/{{sim}}/shape_catalog_cut_{SHAPE}.fits", sim=SIMS
         ),
-        # The per-branch ShapePipe campaign records, for provenance.
-        campaigns=expand(
-            f"{GRIDS_BASE}/{{sim}}/logs/shapepipe_campaign.yaml", sim=SIMS
-        ),
+        # The per-branch ShapePipe campaign records, for provenance: the
+        # edge that says every campaign finished before this config was
+        # written. ShapePipe's own workflow publishes run_report.json with the
+        # products; the old logs/shapepipe_campaign.yaml was im_pipeline's
+        # output and is never written now that `sp run` drives the campaigns.
+        # Nothing READS these -- im_mbias_config.py takes no input.* -- so the
+        # path only has to name something the campaign really produced.
+        campaigns=campaign_records(),
     output:
         cfg=f"{GRIDS_BASE}/results/m_bias_config.yaml",
     params:
@@ -477,8 +524,15 @@ rule im_mbias_config:
         n_bootstrap=IMSIM["n_bootstrap"],
         pair_match=IMSIM["pair_match"],
         bootstrap_seed=IMSIM["bootstrap_seed"],
-    container:
-        SIF
+    # NO container: -- deliberately. This is snakemake's `script:` directive,
+    # which pickles the `snakemake` object on the host and unpickles it inside
+    # the job, so host and job need compatible snakemake versions. They are not:
+    # the host has 9.16.3 and the image 9.22.0, and the pickle fails with
+    # "Can't get attribute 'InputFiles' on module snakemake.io". Nothing here
+    # needs the image anyway -- the script imports only hashlib, os, re,
+    # subprocess and yaml, and reads git metadata from the checkouts, which is
+    # easier outside the container than in. The `shell:` rules keep theirs;
+    # they pass strings, not pickles.
     script:
         "../scripts/im_mbias_config.py"
 

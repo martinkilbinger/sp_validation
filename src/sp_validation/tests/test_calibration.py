@@ -413,3 +413,84 @@ def test_mask_gal_SNR_boolean_mask():
     mask_shifted = mask_gal_SNR(SNR, snr_min=12.0, snr_max=500.0)
     assert mask[2] and not mask_shifted[2]
     assert not np.array_equal(mask, mask_shifted)
+
+
+def _build_noisy_ngmix_catalog(n=600, n_groups=5, step=0.01, seed=1):
+    """NGMIX catalogue with scatter, so objects cross the cuts between
+    branches and the selection response is non-zero; plus a group label."""
+    rng = np.random.default_rng(seed)
+    g1 = rng.normal(0, 0.3, n)
+    g2 = rng.normal(0, 0.3, n)
+    shifts = {
+        "NOSHEAR": (0.0, 0.0),
+        "1P": (step, 0.0),
+        "1M": (-step, 0.0),
+        "2P": (0.0, step),
+        "2M": (0.0, -step),
+    }
+    cols = {}
+    for var in _VARIANTS:
+        dg1, dg2 = shifts[var]
+        cols[f"NGMIX_G1_{var}"] = g1 + 0.8 * dg1 + 0.05 * dg2
+        cols[f"NGMIX_G2_{var}"] = g2 + 0.8 * dg2 - 0.03 * dg1
+        cols[f"NGMIX_FLAGS_{var}"] = np.zeros(n, dtype=int)
+        # SNR near the cut, shifting with the branch -> selection response
+        cols[f"NGMIX_FLUX_{var}"] = rng.uniform(5, 30, n) * (1 + 3 * (dg1 + dg2))
+        cols[f"NGMIX_FLUX_ERR_{var}"] = np.ones(n)
+        cols[f"NGMIX_T_{var}"] = rng.uniform(0.3, 3.5, n)
+        cols[f"NGMIX_T_ERR_{var}"] = np.full(n, 0.1)
+        cols[f"NGMIX_T_PSF_RECONV_{var}"] = np.ones(n)
+    cols["NGMIX_G1_ERR_NOSHEAR"] = rng.uniform(0.01, 0.1, n)
+    cols["NGMIX_G2_ERR_NOSHEAR"] = rng.uniform(0.01, 0.1, n)
+    groups = np.array([f"t{i}" for i in rng.integers(0, n_groups, n)])
+    return Table(cols), groups
+
+
+@pytest.mark.parametrize("weight", [None, "w"])
+def test_metacal_response_jackknife_matches_leave_out_rebuild(weight):
+    """Each leave-one-group-out R equals R of a metacal built without that
+    group, for both the shear and the selection term."""
+    data, groups = _build_noisy_ngmix_catalog()
+    kw = dict(size_corr_ell=False, global_R_weight=weight, step=0.01)
+    mcal = metacal(data, np.ones(len(groups), dtype=bool), **kw)
+    assert np.all(np.abs(mcal.R_selection) > 0)
+
+    labels, R_jk, R_joint_jk = mcal.response_jackknife(groups)
+    npt.assert_array_equal(labels, np.unique(groups))
+    for label, R, R_joint in zip(labels, R_jk, R_joint_jk):
+        ref = metacal(data, groups != label, **kw)
+        npt.assert_allclose(R, ref.R, rtol=1e-12, atol=1e-14)
+        npt.assert_allclose(R_joint, ref.R_joint, rtol=1e-12, atol=1e-14)
+        assert not np.allclose(R, mcal.R)
+        assert not np.allclose(R_joint, mcal.R_joint)
+
+
+@pytest.mark.parametrize("weight", [None, "w"])
+def test_metacal_joint_response(weight):
+    """R_joint is the difference of sheared-branch means, each over its own
+    sheared selection; it differs from R = R_shear + R_selection only at
+    second order."""
+    data, _ = _build_noisy_ngmix_catalog()
+    mcal = metacal(
+        data,
+        np.ones(len(data), dtype=bool),
+        size_corr_ell=False,
+        global_R_weight=weight,
+        step=0.01,
+    )
+    w = mcal.ns["w"] if weight else np.ones(len(data))
+    ma = mcal.mask_dict
+
+    def mean(branch, comp, key):
+        return np.average(branch[comp][ma[key]], weights=w[ma[key]])
+
+    R11 = (mean(mcal.p1, "g1", "p1") - mean(mcal.m1, "g1", "m1")) / 0.02
+    R12 = (mean(mcal.p2, "g1", "p2") - mean(mcal.m2, "g1", "m2")) / 0.02
+    R21 = (mean(mcal.p1, "g2", "p1") - mean(mcal.m1, "g2", "m1")) / 0.02
+    R22 = (mean(mcal.p2, "g2", "p2") - mean(mcal.m2, "g2", "m2")) / 0.02
+    npt.assert_allclose(mcal.R_joint, [[R11, R12], [R21, R22]], rtol=1e-12)
+
+    # In this catalogue every object has the same shear response, so
+    # <g_p> over sel_p = <g_ns> over sel_p + const and the two estimators
+    # agree to rounding
+    npt.assert_allclose(mcal.R_joint, mcal.R, rtol=1e-10, atol=1e-12)

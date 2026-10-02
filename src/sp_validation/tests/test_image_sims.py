@@ -251,3 +251,222 @@ def test_mbias_pool_cancels_shape_noise(tmp_path):
         assert abs(res[f"m{comp}"] - M_TRUE) < 5 * res[f"m{comp}_err"]
         # ...and its error is far below what an unpaired estimator would give.
         assert res[f"m{comp}_err"] < 0.1 * shape_noise_floor
+
+
+def _write_jk_cat(path, ra, dec, g_uncal, tiles, R, R_jk, RJ=None, RJ_jk=None):
+    """Calibrated catalogue with TILE_ID and a leave-one-tile-out R_JK HDU;
+    optionally with the joint response (header RJ_ij, columns RJ_ij)."""
+    e = np.linalg.inv(R) @ g_uncal
+    cols = [
+        fits.Column(name=name, array=arr, format="D")
+        for name, arr in (
+            ("RA", ra),
+            ("Dec", dec),
+            ("e1", e[0]),
+            ("e2", e[1]),
+            ("e1_uncal", g_uncal[0]),
+            ("e2_uncal", g_uncal[1]),
+        )
+    ]
+    cols.append(fits.Column(name="TILE_ID", array=tiles, format="7A"))
+    primary = fits.PrimaryHDU()
+    for i in (1, 2):
+        for j in (1, 2):
+            primary.header[f"R_{i}{j}"] = R[i - 1, j - 1]
+            if RJ is not None:
+                primary.header[f"RJ_{i}{j}"] = RJ[i - 1, j - 1]
+    labels = sorted(R_jk)
+    jk_cols = [fits.Column(name="TILE_ID", array=labels, format="7A")]
+    for key, resp in (("R", R_jk), ("RJ", RJ_jk)):
+        if resp is None:
+            continue
+        for i in (1, 2):
+            for j in (1, 2):
+                jk_cols.append(
+                    fits.Column(
+                        name=f"{key}_{i}{j}",
+                        array=[resp[t][i - 1, j - 1] for t in labels],
+                        format="D",
+                    )
+                )
+    fits.HDUList(
+        [
+            primary,
+            fits.BinTableHDU.from_columns(cols),
+            fits.BinTableHDU.from_columns(jk_cols, name="R_JK"),
+        ]
+    ).writeto(path, overwrite=True)
+
+
+def test_mbias_tile_jackknife_recalibrates_per_tile(tmp_path):
+    """The tile jackknife drops one tile from both catalogues, recalibrates
+    each with its leave-out response, and uses the (N-1)/N jackknife factor;
+    checked against a brute-force computation."""
+    num = 3
+    n_tiles = 6
+    rng = np.random.default_rng(5)
+    ra = 30.0 + rng.uniform(0, 0.1, N_GAL)
+    dec = rng.uniform(0, 0.1, N_GAL)
+    tiles = np.array([f"{100 + i}.200" for i in rng.integers(0, n_tiles, N_GAL)])
+    labels = np.unique(tiles)
+    e_int = rng.normal(0, 0.3, (2, N_GAL))
+
+    R_true = np.array([[0.75, 0.01], [-0.02, 0.72]])
+    g_in = {
+        "1z2z": (0, 0),
+        "1p2z": (A, 0),
+        "1m2z": (-A, 0),
+        "1z2p": (0, A),
+        "1z2m": (0, -A),
+    }
+    truth = {}
+    for idx, (name, g) in enumerate(g_in.items()):
+        g_uncal = R_true @ (e_int + np.array(g)[:, None] * (1 + M_TRUE))
+        g_uncal += rng.normal(0, 0.01, (2, N_GAL))
+        R = R_true + rng.normal(0, 0.005, (2, 2))
+        R_jk = {t: R + rng.normal(0, 0.01, (2, 2)) for t in labels}
+        sim_dir = tmp_path / f"{name}_grid_{num}"
+        sim_dir.mkdir()
+        _write_jk_cat(sim_dir / "cat.fits", ra, dec, g_uncal, tiles, R, R_jk)
+        truth[name] = (g_uncal, R_jk)
+
+    config = {
+        "grids_dir": str(tmp_path),
+        "num": num,
+        "catalog_name": "cat.fits",
+        "shear_amplitude": A,
+        "match_radius_deg": 0.0002,
+        "w_cols": ["none"],
+        "n_bootstrap": 20,
+        "pair_match": True,
+        "bootstrap_seed": 42,
+    }
+    mb = ImageSimMBias(config)
+    mb.load_catalogs(verbose=False)
+    res = mb.run(verbose=False)
+
+    for name_p, name_m, comp in (("1p2z", "1m2z", 0), ("1z2p", "1z2m", 1)):
+        m_jk = []
+        for t in labels:
+            keep = tiles != t
+            (gp, Rp), (gm, Rm) = truth[name_p], truth[name_m]
+            ep = np.linalg.solve(Rp[t], gp)[comp][keep]
+            em = np.linalg.solve(Rm[t], gm)[comp][keep]
+            m_jk.append(np.mean((ep - em) / (2 * A)) - 1)
+        m_jk = np.array(m_jk)
+        err = np.sqrt((n_tiles - 1) / n_tiles * np.sum((m_jk - m_jk.mean()) ** 2))
+        k = comp + 1
+        assert res[f"n{k}_jk"] == n_tiles
+        npt.assert_allclose(res[f"m{k}_err_jk"], err, rtol=1e-10)
+        # TEETH: recalibrating per tile matters; a fixed-R tile jackknife
+        # gives a different error.
+        (gp, _), (gm, _) = truth[name_p], truth[name_m]
+        ep_fix = np.linalg.solve(mb.cats[name_p]["jk"]["resp"]["default"]["R"], gp)[comp]
+        em_fix = np.linalg.solve(mb.cats[name_m]["jk"]["resp"]["default"]["R"], gm)[comp]
+        m_fix = np.array(
+            [np.mean((ep_fix - em_fix)[tiles != t] / (2 * A)) - 1 for t in labels]
+        )
+        err_fix = np.sqrt((n_tiles - 1) / n_tiles * np.sum((m_fix - m_fix.mean()) ** 2))
+        assert not np.isclose(res[f"m{k}_err_jk"], err_fix, rtol=1e-3)
+
+
+def test_mbias_no_tile_jackknife_without_inputs(tmp_path):
+    """Catalogues without TILE_ID / R_JK give bootstrap errors only."""
+    num = 8
+    _make_grid(tmp_path, num)
+    config = {
+        "grids_dir": str(tmp_path),
+        "num": num,
+        "catalog_name": "cat.fits",
+        "shear_amplitude": A,
+        "match_radius_deg": 0.0002,
+        "w_cols": ["w_des"],
+        "n_bootstrap": 10,
+        "pair_match": True,
+        "bootstrap_seed": 42,
+    }
+    mb = ImageSimMBias(config)
+    mb.load_catalogs(verbose=False)
+    res = mb.run(verbose=False)
+    assert not any(key.endswith("_jk") for key in res)
+
+
+def test_mbias_joint_response(tmp_path):
+    """With the joint response on input, m/c are computed a second time with
+    the shear recalibrated by R_joint, including the tile jackknife; the
+    default results are unchanged."""
+    num = 4
+    n_tiles = 5
+    rng = np.random.default_rng(9)
+    ra = 30.0 + rng.uniform(0, 0.1, N_GAL)
+    dec = rng.uniform(0, 0.1, N_GAL)
+    tiles = np.array([f"{100 + i}.200" for i in rng.integers(0, n_tiles, N_GAL)])
+    labels = np.unique(tiles)
+    e_int = rng.normal(0, 0.3, (2, N_GAL))
+
+    R_true = np.array([[0.75, 0.01], [-0.02, 0.72]])
+    g_in = {
+        "1z2z": (0, 0),
+        "1p2z": (A, 0),
+        "1m2z": (-A, 0),
+        "1z2p": (0, A),
+        "1z2m": (0, -A),
+    }
+    truth = {}
+    for name, g in g_in.items():
+        g_uncal = R_true @ (e_int + np.array(g)[:, None] * (1 + M_TRUE))
+        R = R_true + rng.normal(0, 0.005, (2, 2))
+        RJ = R + rng.normal(0, 0.005, (2, 2))
+        R_jk = {t: R + rng.normal(0, 0.01, (2, 2)) for t in labels}
+        RJ_jk = {t: RJ + rng.normal(0, 0.01, (2, 2)) for t in labels}
+        sim_dir = tmp_path / f"{name}_grid_{num}"
+        sim_dir.mkdir()
+        _write_jk_cat(
+            sim_dir / "cat.fits", ra, dec, g_uncal, tiles, R, R_jk, RJ, RJ_jk
+        )
+        truth[name] = (g_uncal, R, RJ, RJ_jk)
+
+    config = {
+        "grids_dir": str(tmp_path),
+        "num": num,
+        "catalog_name": "cat.fits",
+        "shear_amplitude": A,
+        "match_radius_deg": 0.0002,
+        "w_cols": ["none"],
+        "n_bootstrap": 20,
+        "pair_match": True,
+        "bootstrap_seed": 42,
+    }
+    mb = ImageSimMBias(config)
+    mb.load_catalogs(verbose=False)
+    res = mb.run(verbose=False)
+    joint = res["joint"]["weights"]["none"]
+
+    for name_p, name_m, comp in (("1p2z", "1m2z", 0), ("1z2p", "1z2m", 1)):
+        (gp, Rp, RJp, RJp_jk), (gm, Rm, RJm, RJm_jk) = truth[name_p], truth[name_m]
+        k = comp + 1
+
+        # Central values: default with R, joint with R_joint
+        for resp_p, resp_m, out in ((Rp, Rm, res), (RJp, RJm, joint)):
+            ep = np.linalg.solve(resp_p, gp)[comp]
+            em = np.linalg.solve(resp_m, gm)[comp]
+            npt.assert_allclose(out[f"m{k}"], np.mean((ep - em) / (2 * A)) - 1)
+            npt.assert_allclose(out[f"c{k}"], np.mean((ep + em) / 2), atol=1e-15)
+
+        # Joint jackknife uses the joint leave-out responses
+        m_jk = np.array(
+            [
+                np.mean(
+                    (
+                        np.linalg.solve(RJp_jk[t], gp)[comp]
+                        - np.linalg.solve(RJm_jk[t], gm)[comp]
+                    )[tiles != t]
+                    / (2 * A)
+                )
+                - 1
+                for t in labels
+            ]
+        )
+        err = np.sqrt((n_tiles - 1) / n_tiles * np.sum((m_jk - m_jk.mean()) ** 2))
+        npt.assert_allclose(joint[f"m{k}_err_jk"], err, rtol=1e-10)
+        assert joint[f"m{k}"] != res[f"m{k}"]
